@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DPD Driving Safety</title>
+
+<!--
+  DPD Driving Safety Program — Foundation
+  ----------------------------------------
+  Single-file web app. HTML + CSS + vanilla JS. No build step.
+  Host on GitHub Pages; open from the hosted https:// URL (MSAL login
+  will not work from a local file:// path).
+
+  This file establishes:
+    1. Design system (DPD navy, status colors, type scale)
+    2. MSAL authentication (two-token pattern: Graph identity + SharePoint data)
+    3. SharePoint REST layer (get / create / update / delete + field inspector)
+    4. App shell (sidebar nav, top bar, hash router, screen registry)
+    5. Shared UI primitives (toast, loading, badges, DOM helper, date/email utils)
+
+  Screens are registered as render functions in the SCREENS object near the
+  bottom. Dashboard, Roster, Imports, Reports, Tickets, Admin, and Audit are
+  stubbed for now and get built out in later sessions.
+-->
+
+<style>
+/* ============================================================
+   DESIGN SYSTEM
+   System font stack (Segoe UI on the city's Windows machines) —
+   no external font CDN, so nothing to be blocked on a locked-down
+   network. Navy + slate + status colors. A single brass hairline
+   is the identity accent.
+   ============================================================ */
+:root {
+  --navy-900: #0f1e38;
+  --navy-800: #16294a;
+  --navy-700: #1c3559;
+  --navy-500: #2f5488;
+  --navy-300: #6d88b3;
+  --navy-100: #e8eef6;
+
+  --brass:    #b08d57;
+  --brass-lt: #c9a86e;
+
+  --ink:    #1a1f2b;
+  --slate:  #5a6478;
+  --muted:  #8a92a3;
+  --line:   #dfe3ea;
+  --line-2: #eef1f5;
+  --paper:  #ffffff;
+  --canvas: #f4f6f9;
+
+  --clear:    #1f7a4d;
+  --clear-bg: #e7f3ec;
+  --due:      #9a6714;
+  --due-bg:   #fbf1dd;
+  --overdue:  #b32d2d;
+  --overdue-bg: #f9e7e7;
+
+  --danger:  #b32d2d;
+  --radius:  8px;
+  --radius-lg: 12px;
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  --sidebar-w: 232px;
+  --shadow-card: 0 1px 2px rgba(15,30,56,0.06), 0 1px 3px rgba(15,30,56,0.04);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: var(--font);
+  color: var(--ink);
+  background: var(--canvas);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3 { margin: 0; font-weight: 600; color: var(--ink); }
+a { color: var(--navy-500); }
+button { font-family: var(--font); }
+.tnum { font-variant-numeric: tabular-nums; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* ---- Buttons ---- */
+.btn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 15px; border-radius: var(--radius);
+  border: 1px solid transparent; background: var(--navy-700); color: #fff;
+  font-size: 14px; font-weight: 500; cursor: pointer; line-height: 1.2;
+  transition: background .12s ease, border-color .12s ease;
+}
+.btn:hover { background: var(--navy-800); }
+.btn:focus-visible { outline: 2px solid var(--navy-500); outline-offset: 2px; }
+.btn--ghost { background: transparent; color: var(--navy-700); border-color: var(--line); }
+.btn--ghost:hover { background: var(--navy-100); }
+.btn--sm { padding: 5px 11px; font-size: 13px; }
+.btn:disabled { opacity: .55; cursor: default; }
+
+/* ---- Login ---- */
+#login {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.login-card {
+  width: 100%; max-width: 400px; background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  box-shadow: 0 8px 30px rgba(15,30,56,0.10); overflow: hidden;
+}
+.login-card__accent { height: 4px; background: linear-gradient(90deg, var(--brass), var(--brass-lt)); }
+.login-card__body { padding: 36px 34px 34px; text-align: center; }
+.login-mark {
+  width: 52px; height: 52px; margin: 0 auto 18px; border-radius: 12px;
+  background: var(--navy-800); color: var(--brass-lt);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 20px; letter-spacing: .5px;
+}
+.login-card h1 { font-size: 20px; margin-bottom: 6px; }
+.login-card p { color: var(--slate); font-size: 14px; margin: 0 0 26px; }
+.login-card .btn { width: 100%; justify-content: center; padding: 11px; }
+.login-err {
+  margin-top: 18px; font-size: 13px; color: var(--danger);
+  background: var(--overdue-bg); border-radius: var(--radius);
+  padding: 10px 12px; text-align: left; display: none;
+}
+
+/* ---- App shell ---- */
+#app { display: none; min-height: 100vh; }
+.shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; min-height: 100vh; }
+
+.sidebar {
+  background: var(--navy-900); color: #c7d0e0;
+  display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
+}
+.sidebar__brand {
+  display: flex; align-items: center; gap: 11px;
+  padding: 18px 18px 16px; border-bottom: 1px solid rgba(255,255,255,0.07);
+}
+.sidebar__mark {
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  background: var(--navy-700); color: var(--brass-lt);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 14px; letter-spacing: .5px;
+}
+.sidebar__brand b { color: #fff; font-size: 14px; font-weight: 600; display: block; line-height: 1.25; }
+.sidebar__brand span { color: var(--navy-300); font-size: 11.5px; }
+
+.nav { padding: 12px 10px; flex: 1; overflow-y: auto; }
+.nav a {
+  display: flex; align-items: center; gap: 11px;
+  padding: 9px 12px; margin-bottom: 2px; border-radius: var(--radius);
+  color: #b3bfd4; text-decoration: none; font-size: 14px; font-weight: 500;
+  border-left: 2px solid transparent; transition: background .1s ease, color .1s ease;
+}
+.nav a .ico { width: 17px; text-align: center; font-size: 15px; opacity: .85; }
+.nav a:hover { background: rgba(255,255,255,0.05); color: #fff; }
+.nav a.active {
+  background: var(--navy-700); color: #fff;
+  border-left-color: var(--brass); border-radius: 0 var(--radius) var(--radius) 0;
+}
+.nav a.active .ico { opacity: 1; color: var(--brass-lt); }
+
+.sidebar__foot {
+  padding: 13px 16px; border-top: 1px solid rgba(255,255,255,0.07);
+  font-size: 11.5px; color: var(--navy-300);
+}
+
+/* ---- Main ---- */
+.main { display: flex; flex-direction: column; min-width: 0; }
+.topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 26px; height: 58px; background: var(--paper);
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5;
+}
+.topbar h2 { font-size: 17px; font-weight: 600; }
+.topbar__user { display: flex; align-items: center; gap: 14px; }
+.topbar__who { text-align: right; line-height: 1.25; }
+.topbar__who b { font-size: 13.5px; font-weight: 600; display: block; }
+.topbar__who span { font-size: 12px; color: var(--muted); }
+
+.content { padding: 26px; max-width: 1180px; width: 100%; }
+
+/* ---- Cards / generic ---- */
+.card {
+  background: var(--paper); border: 1px solid var(--line);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-card);
+}
+.card__head {
+  padding: 15px 20px; border-bottom: 1px solid var(--line-2);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.card__head h3 { font-size: 15px; }
+.card__body { padding: 20px; }
+
+.stub {
+  border: 1px dashed var(--line); border-radius: var(--radius-lg);
+  padding: 44px 30px; text-align: center; color: var(--slate); background: var(--paper);
+}
+.stub h3 { font-size: 16px; margin-bottom: 6px; color: var(--ink); }
+.stub p { margin: 0; font-size: 14px; }
+
+/* ---- Status badges (the compliance identity that runs through every screen) ---- */
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 500;
+  line-height: 1.6;
+}
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.badge--clear   { color: var(--clear);   background: var(--clear-bg); }
+.badge--due     { color: var(--due);     background: var(--due-bg); }
+.badge--overdue { color: var(--overdue); background: var(--overdue-bg); }
+.badge--neutral { color: var(--slate);   background: var(--line-2); }
+
+/* ---- Loading ---- */
+.spinner {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2.5px solid var(--line); border-top-color: var(--navy-500);
+  animation: spin .7s linear infinite; margin: 0 auto;
+}
+.loading { padding: 40px; text-align: center; color: var(--muted); font-size: 13px; }
+.loading .spinner { margin-bottom: 12px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }
+
+/* ---- Toast ---- */
+#toasts {
+  position: fixed; bottom: 22px; right: 22px; z-index: 100;
+  display: flex; flex-direction: column; gap: 10px; max-width: 340px;
+}
+.toast {
+  background: var(--navy-900); color: #fff; padding: 12px 16px;
+  border-radius: var(--radius); font-size: 13.5px; box-shadow: 0 6px 20px rgba(15,30,56,0.25);
+  border-left: 3px solid var(--navy-500); animation: toastIn .18s ease;
+}
+.toast--success { border-left-color: var(--clear); }
+.toast--error   { border-left-color: var(--overdue); }
+@keyframes toastIn { from { opacity: 0; transform: translateY(6px); } }
+
+/* ---- Stat row ---- */
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 22px; }
+.stat {
+  background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  padding: 15px 18px; box-shadow: var(--shadow-card);
+}
+.stat b { display: block; font-size: 27px; font-weight: 600; line-height: 1.1; letter-spacing: -.5px; }
+.stat span { font-size: 12.5px; color: var(--slate); }
+.stat--due b { color: var(--due); }
+.stat--overdue b { color: var(--overdue); }
+.stat--clear b { color: var(--clear); }
+
+/* ---- Dashboard card stack ---- */
+.dash-grid { display: grid; grid-template-columns: 1fr; gap: 18px; }
+
+/* ---- Tables ---- */
+.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+.tbl th {
+  text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .4px;
+  color: var(--muted); font-weight: 600; padding: 0 14px 9px; border-bottom: 1px solid var(--line);
+}
+.tbl td { padding: 11px 14px; border-bottom: 1px solid var(--line-2); }
+.tbl tbody tr:last-child td { border-bottom: none; }
+.tbl tbody tr:hover { background: var(--canvas); }
+.tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl .nowrap { white-space: nowrap; }
+.tbl .strong { font-weight: 600; }
+.count-pill { font-size: 12.5px; color: var(--slate); background: var(--line-2); border-radius: 999px; padding: 2px 10px; font-weight: 500; }
+.empty-mini { padding: 28px; text-align: center; color: var(--muted); font-size: 13.5px; }
+
+/* ---- Forms / inputs ---- */
+.field {
+  width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+  font-size: 14px; font-family: var(--font); color: var(--ink); background: var(--paper);
+}
+.field:focus { outline: none; border-color: var(--navy-500); box-shadow: 0 0 0 3px rgba(47,84,136,.12); }
+select.field { cursor: pointer; }
+.label { display: block; font-size: 12px; font-weight: 600; color: var(--slate); margin-bottom: 6px; }
+.toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.toolbar .field { max-width: 340px; }
+.toolbar__spacer { flex: 1; }
+
+/* ---- Roster split + detail ---- */
+.split { display: grid; grid-template-columns: 1fr 372px; gap: 18px; align-items: start; }
+.roster-row { cursor: pointer; }
+.roster-row.selected td { background: var(--navy-100); }
+.detail { position: sticky; top: 78px; }
+.detail__name { font-size: 17px; font-weight: 600; margin-bottom: 2px; }
+.detail__sub { font-size: 13px; color: var(--slate); margin-bottom: 18px; }
+.detail__row {
+  display: flex; justify-content: space-between; align-items: center; gap: 14px;
+  padding: 10px 0; border-bottom: 1px solid var(--line-2); font-size: 13.5px;
+}
+.detail__row:last-of-type { border-bottom: none; }
+.detail__row .k { color: var(--slate); flex: none; }
+.detail__row .v { text-align: right; }
+.detail__edit { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.detail__edit .row { display: flex; gap: 10px; align-items: flex-end; }
+.detail__edit .row .field { flex: 1; }
+.detail__empty { color: var(--muted); font-size: 13.5px; text-align: center; padding: 44px 12px; }
+
+@media (max-width: 900px) {
+  .split { grid-template-columns: 1fr; }
+  .detail { position: static; }
+  .stats { grid-template-columns: 1fr; }
+}
+
+/* ---- Imports ---- */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; margin-bottom: 20px; flex-wrap: wrap; }
+.seg button {
+  padding: 8px 17px; border: none; background: var(--paper); color: var(--slate);
+  font-size: 14px; font-weight: 500; cursor: pointer; border-right: 1px solid var(--line);
+}
+.seg button:last-child { border-right: none; }
+.seg button.active { background: var(--navy-700); color: #fff; }
+.dropzone {
+  border: 2px dashed var(--line); border-radius: var(--radius-lg); padding: 42px 30px;
+  text-align: center; background: var(--paper); cursor: pointer; transition: border-color .12s, background .12s;
+}
+.dropzone:hover, .dropzone.drag { border-color: var(--navy-500); background: var(--navy-100); }
+.dropzone .dz-ico { font-size: 26px; color: var(--navy-300); }
+.dropzone h3 { font-size: 15px; margin: 10px 0 4px; }
+.dropzone p { margin: 0; font-size: 13px; color: var(--muted); }
+.import-note {
+  font-size: 13px; color: var(--slate); margin-bottom: 16px;
+  background: var(--navy-100); border-radius: var(--radius); padding: 11px 14px;
+}
+.import-note.warn { background: var(--due-bg); color: var(--due); }
+.progress { height: 8px; background: var(--line-2); border-radius: 999px; overflow: hidden; margin: 8px 0 4px; }
+.progress__bar { height: 100%; background: var(--navy-500); width: 0; transition: width .2s ease; }
+
+/* ---- Modal ---- */
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(15,30,56,.42); z-index: 200;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  animation: fadeIn .12s ease;
+}
+@keyframes fadeIn { from { opacity: 0; } }
+.modal {
+  background: var(--paper); border-radius: var(--radius-lg); width: 100%; max-width: 480px;
+  box-shadow: 0 20px 60px rgba(15,30,56,.3); max-height: 90vh; overflow: auto;
+}
+.modal__head { padding: 16px 20px; border-bottom: 1px solid var(--line-2); display: flex; justify-content: space-between; align-items: center; }
+.modal__head h3 { font-size: 16px; }
+.modal__body { padding: 20px; }
+.modal__foot { padding: 14px 20px; border-top: 1px solid var(--line-2); display: flex; gap: 10px; justify-content: flex-end; }
+.x-btn { background: none; border: none; font-size: 22px; color: var(--muted); cursor: pointer; line-height: 1; padding: 0 4px; }
+.x-btn:hover { color: var(--ink); }
+
+/* ---- Forms ---- */
+.form-group { margin-bottom: 15px; }
+textarea.field { resize: vertical; min-height: 74px; line-height: 1.45; }
+.help { font-size: 12px; color: var(--muted); margin-top: 5px; }
+.check { display: flex; align-items: center; gap: 9px; font-size: 14px; cursor: pointer; user-select: none; }
+.check input { width: 16px; height: 16px; accent-color: var(--navy-700); }
+.form-actions { display: flex; gap: 10px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line-2); }
+
+/* ---- Export checklist ---- */
+.export-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin: 4px 0 20px; }
+.export-item {
+  display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; background: var(--paper);
+}
+.export-item:hover { border-color: var(--navy-300); }
+.export-item.on { border-color: var(--navy-500); background: var(--navy-100); }
+.export-item input { width: 16px; height: 16px; accent-color: var(--navy-700); }
+.export-item .lbl b { font-size: 14px; display: block; }
+.export-item .lbl span { font-size: 12px; color: var(--muted); }
+
+@media (max-width: 640px) { .export-list { grid-template-columns: 1fr; } }
+
+/* ---- Responsive ---- */
+@media (max-width: 760px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar { position: static; height: auto; flex-direction: row; align-items: center; overflow-x: auto; }
+  .sidebar__brand { border-bottom: none; border-right: 1px solid rgba(255,255,255,0.07); }
+  .nav { display: flex; padding: 8px; }
+  .nav a { margin-bottom: 0; white-space: nowrap; border-left: none; border-bottom: 2px solid transparent; }
+  .nav a.active { border-radius: var(--radius); border-left: none; border-bottom-color: var(--brass); }
+  .sidebar__foot { display: none; }
+  .content { padding: 18px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ============ LOGIN VIEW ============ -->
+<section id="login">
+  <div class="login-card">
+    <div class="login-card__accent"></div>
+    <div class="login-card__body">
+      <div class="login-mark">DS</div>
+      <h1>Driving Safety</h1>
+      <p>Dallas Police Department</p>
+      <button id="signInBtn" class="btn">Sign in with city account</button>
+      <div id="loginErr" class="login-err"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ APP SHELL ============ -->
+<div id="app">
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="sidebar__brand">
+        <div class="sidebar__mark">DS</div>
+        <div>
+          <b>Driving Safety</b>
+          <span>Dallas Police Dept</span>
+        </div>
+      </div>
+      <nav class="nav" id="nav"><!-- links injected --></nav>
+      <div class="sidebar__foot" id="sidebarFoot">v0.1 · foundation</div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <h2 id="pageTitle">Dashboard</h2>
+        <div class="topbar__user">
+          <div class="topbar__who">
+            <b id="userName">—</b>
+            <span id="userEmail">—</span>
+          </div>
+          <button id="signOutBtn" class="btn btn--ghost btn--sm">Sign out</button>
+        </div>
+      </header>
+      <div class="content" id="content"><!-- screen renders here --></div>
+    </main>
+  </div>
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+
+<!-- ============ MSAL (v2.35.0, CDN with fallback) ============ -->
+<script src="https://alcdn.msauth.net/browser/2.35.0/js/msal-browser.min.js"
+        onerror="loadMsalFallback()"></script>
+<script>
+function loadMsalFallback() {
+  var s = document.createElement('script');
+  s.src = "https://alcdn.msftauth.net/browser/2.35.0/js/msal-browser.min.js";
+  s.onload = boot;
+  s.onerror = function () { showLoginError("Couldn't load the sign-in library. Check the network connection and reload."); };
+  document.head.appendChild(s);
+}
+</script>
+
+<script>
+/* ============================================================
+   CONFIG
+   ============================================================ */
+const CONFIG = {
+  clientId:    "0d384d2a-9a9e-46f6-a195-ad63f9e94f06",   // reused "PatrolBidPortal" registration
+  tenantId:    "2935709e-c10c-4809-a302-852d369f8700",
+  // Hardcoded per convention — never window.location.href.
+  // This exact URL must be added as a redirect URI on the app registration.
+  redirectUri: "https://personnelspecialprojects.github.io/dpd-driving-safety/",
+  spHost:      "https://dallastxgov.sharepoint.com",
+  siteUrl:     "https://dallastxgov.sharepoint.com/sites/DrivingSafetyProgram",
+  graphScopes: ["User.Read"],
+  spScopes:    ["https://dallastxgov.sharepoint.com/AllSites.Write"],
+};
+
+const LISTS = {
+  roster:    "DrivingSafety_Roster",
+  courses:   "DrivingSafety_Courses",
+  physicals: "DrivingSafety_Physicals",
+  accidents: "DrivingSafety_Accidents",
+  awards:    "DrivingSafety_Awards",
+  audit:     "DrivingSafety_AuditLog",
+  tickets:   "DrivingSafety_Tickets",
+  config:    "DrivingSafety_Config",
+};
+
+/* ============================================================
+   DS — the app namespace (helpers used by every screen)
+   ============================================================ */
+const DS = {};
+
+/* ---- tiny DOM helper: DS.el('div', {class:'x'}, [childOrString]) ---- */
+DS.el = function (tag, props, children) {
+  const node = document.createElement(tag);
+  if (props) for (const k in props) {
+    if (k === "class") node.className = props[k];
+    else if (k === "html") node.innerHTML = props[k];
+    else if (k === "text") node.textContent = props[k];
+    else if (k.startsWith("on") && typeof props[k] === "function") node.addEventListener(k.slice(2), props[k]);
+    else if (props[k] != null) node.setAttribute(k, props[k]);
+  }
+  if (children != null) {
+    (Array.isArray(children) ? children : [children]).forEach(c => {
+      if (c == null) return;
+      node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    });
+  }
+  return node;
+};
+
+/* ---- toast ---- */
+DS.toast = function (msg, type) {
+  const t = DS.el("div", { class: "toast" + (type ? " toast--" + type : ""), text: msg });
+  document.getElementById("toasts").appendChild(t);
+  setTimeout(() => t.remove(), type === "error" ? 6000 : 3500);
+};
+
+/* ---- loading state into a container ---- */
+DS.showLoading = function (container, label) {
+  container.innerHTML = "";
+  container.appendChild(DS.el("div", { class: "loading" }, [
+    DS.el("div", { class: "spinner" }),
+    DS.el("div", { text: label || "Loading…" }),
+  ]));
+};
+
+/* ---- status badge ---- */
+DS.badge = function (text, kind) {
+  return DS.el("span", { class: "badge badge--" + (kind || "neutral"), text: text });
+};
+
+/* ---- dates ---- */
+DS.parseDate = function (v) {                       // tolerant → Date | null
+  if (v == null || v === "") return null;
+  if (v instanceof Date) return isNaN(v) ? null : v;
+  if (typeof v === "number") {                      // Excel serial
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 86400000);
+    return isNaN(d) ? null : d;
+  }
+  const s = String(v).trim();
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return new Date(+m[3], +m[1] - 1, +m[2]);
+  const d = new Date(s);
+  return isNaN(d) ? null : d;
+};
+DS.fmtDate = function (v) {                          // → "Jun 30, 2028" | "—"
+  const d = DS.parseDate(v);
+  if (!d) return "—";
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+};
+DS.isoDate = function (v) {                          // → "2028-06-30" | null  (for SP Date fields)
+  const d = DS.parseDate(v);
+  if (!d) return null;
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+};
+
+/* ---- dual-domain email match: local part only ---- */
+DS.emailLocal = function (email) {
+  return String(email || "").trim().toLowerCase().split("@")[0];
+};
+DS.emailsMatch = function (a, b) {
+  const la = DS.emailLocal(a), lb = DS.emailLocal(b);
+  return !!la && la === lb;
+};
+
+/* ============================================================
+   AUTH  (two-token pattern — Graph identity + SharePoint data;
+          scopes are never combined in one request)
+   ============================================================ */
+let msalInstance = null;
+let account = null;
+let booted = false;
+
+const msalConfig = {
+  auth: {
+    clientId: CONFIG.clientId,
+    authority: "https://login.microsoftonline.com/" + CONFIG.tenantId,
+    redirectUri: CONFIG.redirectUri,
+    navigateToLoginRequestUrl: true,
+  },
+  cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false },
+};
+
+function showLoginError(msg) {
+  const box = document.getElementById("loginErr");
+  box.textContent = msg;
+  box.style.display = "block";
+}
+
+async function acquireToken(scopes) {
+  const req = { scopes, account };
+  try {
+    const r = await msalInstance.acquireTokenSilent(req);
+    return r.accessToken;
+  } catch (e) {
+    if (e instanceof msal.InteractionRequiredAuthError) {
+      // Redirect flow: this navigates away and returns; token picked up on reload.
+      await msalInstance.acquireTokenRedirect(req);
+      return null;
+    }
+    throw e;
+  }
+}
+
+/* Cache the SharePoint token in memory for the session (re-fetched silently as needed). */
+DS.spToken = async function () { return acquireToken(CONFIG.spScopes); };
+
+async function loadIdentity() {
+  document.getElementById("userName").textContent = account.name || account.username || "Signed in";
+  document.getElementById("userEmail").textContent = account.username || "";
+  // Optional Graph call for a cleaner display name; failure here is non-fatal.
+  try {
+    const token = await acquireToken(CONFIG.graphScopes);
+    if (!token) return;
+    const res = await fetch("https://graph.microsoft.com/v1.0/me", {
+      headers: { Authorization: "Bearer " + token },
+    });
+    if (res.ok) {
+      const me = await res.json();
+      if (me.displayName) document.getElementById("userName").textContent = me.displayName;
+      if (me.mail || me.userPrincipalName) document.getElementById("userEmail").textContent = me.mail || me.userPrincipalName;
+      DS.me = me;
+    }
+  } catch (_) { /* identity is best-effort */ }
+};
+
+/* ============================================================
+   SHAREPOINT REST LAYER
+   Bearer token from MSAL is sufficient — no X-RequestDigest needed.
+   Writes use the POST + X-HTTP-Method override pattern (most reliable).
+   ============================================================ */
+function listUrl(listName) {
+  return CONFIG.siteUrl + "/_api/web/lists/getbytitle('" + encodeURIComponent(listName) + "')";
+}
+
+async function spFetch(url, options) {
+  const token = await DS.spToken();
+  if (!token) return null; // a redirect was triggered
+  const headers = Object.assign({
+    "Authorization": "Bearer " + token,
+    "Accept": "application/json;odata=nometadata",
+  }, (options && options.headers) || {});
+  const res = await fetch(url, Object.assign({}, options, { headers }));
+  if (!res.ok) {
+    let detail = res.status + " " + res.statusText;
+    try { const j = await res.json(); detail = (j.error && (j.error.message || j.error["message"])) || detail; } catch (_) {}
+    throw new Error("SharePoint: " + detail);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+/* GET items. opts: { select:[], filter:"", orderby:"", top:N, expand:"" } */
+DS.spGet = async function (listName, opts) {
+  opts = opts || {};
+  const q = [];
+  if (opts.select) q.push("$select=" + opts.select.map(encodeURIComponent).join(","));
+  if (opts.expand) q.push("$expand=" + encodeURIComponent(opts.expand));
+  if (opts.filter) q.push("$filter=" + encodeURIComponent(opts.filter));
+  if (opts.orderby) q.push("$orderby=" + encodeURIComponent(opts.orderby));
+  q.push("$top=" + (opts.top || 5000));
+  const url = listUrl(listName) + "/items" + (q.length ? "?" + q.join("&") : "");
+  const data = await spFetch(url);
+  return data ? (data.value || []) : [];
+};
+
+DS.spGetById = async function (listName, id, opts) {
+  opts = opts || {};
+  const q = [];
+  if (opts.select) q.push("$select=" + opts.select.map(encodeURIComponent).join(","));
+  if (opts.expand) q.push("$expand=" + encodeURIComponent(opts.expand));
+  const url = listUrl(listName) + "/items(" + id + ")" + (q.length ? "?" + q.join("&") : "");
+  return spFetch(url);
+};
+
+DS.spCreate = async function (listName, fields) {
+  return spFetch(listUrl(listName) + "/items", {
+    method: "POST",
+    headers: { "Content-Type": "application/json;odata=nometadata" },
+    body: JSON.stringify(fields),
+  });
+};
+
+DS.spUpdate = async function (listName, id, fields) {
+  return spFetch(listUrl(listName) + "/items(" + id + ")", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json;odata=nometadata",
+      "X-HTTP-Method": "MERGE",
+      "IF-MATCH": "*",
+    },
+    body: JSON.stringify(fields),
+  });
+};
+
+DS.spDelete = async function (listName, id) {
+  return spFetch(listUrl(listName) + "/items(" + id + ")", {
+    method: "POST",
+    headers: { "X-HTTP-Method": "DELETE", "IF-MATCH": "*" },
+  });
+};
+
+/* Field inspector — supports the "verify internal field names before coding"
+   workflow. Run from the browser console, e.g.:  DS.inspectList('DrivingSafety_Roster')
+   Prints internal name → title/type for every non-hidden, non-readonly field,
+   and dumps the first item so you can see real field keys + values. */
+DS.inspectList = async function (listName) {
+  const url = listUrl(listName) +
+    "/fields?$select=InternalName,Title,TypeAsString,Hidden,ReadOnlyField&$filter=Hidden eq false";
+  const data = await spFetch(url);
+  const fields = (data.value || []).filter(f => !f.ReadOnlyField ||
+    ["Id", "Title", "Created", "Modified", "Author", "Editor"].includes(f.InternalName));
+  console.group("Fields — " + listName);
+  console.table(fields.map(f => ({ internal: f.InternalName, title: f.Title, type: f.TypeAsString })));
+  console.groupEnd();
+  const first = await DS.spGet(listName, { top: 1 });
+  console.log("First item (real keys/values):", first[0] || "(list is empty)");
+  return fields;
+};
+
+/* Audit log convenience — every mutating screen calls this. */
+DS.audit = async function (actionType, targetList, targetId, detail) {
+  try {
+    await DS.spCreate(LISTS.audit, {
+      ActionTimestamp: new Date().toISOString(),
+      Actor: (DS.me && (DS.me.mail || DS.me.userPrincipalName)) || (account && account.username) || "unknown",
+      ActionType: actionType,
+      TargetList: targetList || "",
+      TargetId: targetId != null ? String(targetId) : "",
+      Detail: detail || "",
+    });
+  } catch (e) { console.warn("Audit write failed:", e.message); }
+};
+
+/* Expose config/lists for screens + console use. */
+DS.CONFIG = CONFIG;
+DS.LISTS = LISTS;
+
+/* ============================================================
+   ROUTER + SCREEN REGISTRY
+   Hash routing (#/roster) works on GitHub Pages with no server config.
+   Each screen is { title, icon, render(container) }. Stubs for now.
+   ============================================================ */
+function stub(name, note) {
+  return function (container) {
+    container.innerHTML = "";
+    container.appendChild(DS.el("div", { class: "stub" }, [
+      DS.el("h3", { text: name }),
+      DS.el("p", { text: note || "This screen gets built in an upcoming session." }),
+    ]));
+  };
+}
+
+const SCREENS = {
+  dashboard: { title: "Dashboard", icon: "◆", render: stub("Dashboard", "Physicals, courses, and awards coming due — built next.") },
+  roster:    { title: "Roster",    icon: "▤", render: stub("Roster", "Search employees and view compliance detail — built next.") },
+  imports:   { title: "Imports",   icon: "▾", render: stub("Imports", "Drag-and-drop Excel import for courses, accidents, roster, and physicals — built next.") },
+  reports:   { title: "Reports",   icon: "▦", render: stub("Reports", "Export any combination of lists to a multi-sheet Excel workbook — built next.") },
+  tickets:   { title: "Tickets",   icon: "▣", render: stub("Tickets", "Manual activity tracking — built next.") },
+  admin:     { title: "Admin",     icon: "◈", render: stub("Admin", "Alert lead times, required courses, and settings — built next.") },
+  audit:     { title: "Audit log", icon: "◷", render: stub("Audit log", "Full, filterable action history — built next.") },
+};
+const NAV_ORDER = ["dashboard", "roster", "imports", "reports", "tickets", "admin", "audit"];
+const DEFAULT_ROUTE = "dashboard";
+
+function buildNav() {
+  const nav = document.getElementById("nav");
+  nav.innerHTML = "";
+  NAV_ORDER.forEach(key => {
+    const s = SCREENS[key];
+    const a = DS.el("a", { href: "#/" + key }, [
+      DS.el("span", { class: "ico", text: s.icon }),
+      DS.el("span", { text: s.title }),
+    ]);
+    a.dataset.route = key;
+    nav.appendChild(a);
+  });
+}
+
+function currentRoute() {
+  const h = (location.hash || "").replace(/^#\/?/, "");
+  const base = h.split("/")[0];              // sub-routes like roster/123456 resolve to "roster"
+  return SCREENS[base] ? base : DEFAULT_ROUTE;
+}
+
+function renderRoute() {
+  const key = currentRoute();
+  const screen = SCREENS[key];
+  document.getElementById("pageTitle").textContent = screen.title;
+  document.querySelectorAll("#nav a").forEach(a => a.classList.toggle("active", a.dataset.route === key));
+  const content = document.getElementById("content");
+  DS.showLoading(content);
+  try {
+    Promise.resolve(screen.render(content)).catch(err => renderError(content, err));
+  } catch (err) { renderError(content, err); }
+}
+
+function renderError(container, err) {
+  container.innerHTML = "";
+  container.appendChild(DS.el("div", { class: "stub" }, [
+    DS.el("h3", { text: "Something went wrong on this screen" }),
+    DS.el("p", { text: (err && err.message) || "Reload and try again. If it keeps happening, note what you clicked." }),
+  ]));
+  console.error(err);
+}
+
+/* Let future screens register themselves cleanly. */
+DS.registerScreen = function (key, screen) { SCREENS[key] = screen; };
+DS.navigate = function (key) { location.hash = "#/" + key; };
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+async function boot() {
+  if (booted) return;
+  if (typeof msal === "undefined") { showLoginError("Sign-in library unavailable. Reload the page."); return; }
+  booted = true;
+  msalInstance = new msal.PublicClientApplication(msalConfig);
+
+  try {
+    await msalInstance.initialize();
+    const redirectResult = await msalInstance.handleRedirectPromise();
+    if (redirectResult && redirectResult.account) {
+      account = redirectResult.account;
+    } else {
+      const accts = msalInstance.getAllAccounts();
+      if (accts.length) account = accts[0];
+    }
+  } catch (e) {
+    console.error(e);
+    showLoginError("Sign-in didn't complete: " + (e.message || e));
+    return;
+  }
+
+  if (account) {
+    msalInstance.setActiveAccount(account);
+    startApp();
+  } else {
+    document.getElementById("login").style.display = "flex";
+  }
+}
+
+async function startApp() {
+  document.getElementById("login").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  buildNav();
+  window.addEventListener("hashchange", renderRoute);
+  if (!location.hash) location.hash = "#/" + DEFAULT_ROUTE;
+  loadIdentity();       // async, non-blocking
+  renderRoute();
+}
+
+/* Wire login/logout buttons */
+document.getElementById("signInBtn").addEventListener("click", async () => {
+  try {
+    await msalInstance.loginRedirect({ scopes: CONFIG.graphScopes });
+  } catch (e) { showLoginError("Couldn't start sign-in: " + (e.message || e)); }
+});
+document.getElementById("signOutBtn").addEventListener("click", () => {
+  msalInstance.logoutRedirect({ account });
+});
+
+/* Boot after all scripts (foundation + screen modules) have loaded and
+   registered, so the nav reflects real screens rather than stubs.
+   The MSAL fallback path calls boot() on its own onload; the guard makes
+   a second call harmless. */
+function kickoff() { if (typeof msal !== "undefined") boot(); }
+if (document.readyState === "complete") kickoff();
+else window.addEventListener("load", kickoff);
+</script>
+
+<!-- Screen modules — each self-registers via DS.registerScreen. Load order
+     doesn't matter as long as they come after the foundation script above. -->
+<script src="data.js"></script>
+<script src="screens-core.js"></script>
+<script src="imports.js"></script>
+<script src="screens-admin.js"></script>
+</body>
+</html>

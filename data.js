@@ -15,6 +15,7 @@
 
   /* ---- date helpers ---- */
   function addYears(d, n) { const x = new Date(d); x.setFullYear(x.getFullYear() + n); return x; }
+  function addMonths(d, n) { const x = new Date(d); x.setMonth(x.getMonth() + n); return x; }
   function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
   function startOfToday() { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }
 
@@ -67,9 +68,19 @@
   function buildIndexes(cache) {
     const config = cache.config;
     const idx = {
+      // alert timing
       courseLeadDays: cfgNum(config, "CourseAlertLeadDays", 30),
       physLeadDays: cfgNum(config, "PhysicalAlertLeadDays", 30),
+      // compliance rules (safe defaults — app works before these columns exist)
+      courseRenewalYears: cfgNum(config, "CourseRenewalYears", 3),
+      courseGraceMonths: cfgNum(config, "CourseGraceMonths", 12),
+      physicalDefaultYears: cfgNum(config, "PhysicalDefaultYears", 2),
+      awardMilestoneYears: cfgNum(config, "AwardMilestoneYears", 5),
+      awardResetPointThreshold: cfgNum(config, "AwardResetPointThreshold", 0),
+      // required courses + tickets
       requiredTitles: String(config.RequiredCourseTitles || DEFAULT_COURSES)
+        .split(";").map(t => t.trim()).filter(Boolean),
+      ticketCategories: String(config.TicketCategories || "")
         .split(";").map(t => t.trim()).filter(Boolean),
       allowMark: config.AllowMarkAsAwarded === true || String(config.AllowMarkAsAwarded).toLowerCase() === "yes",
       rosterByEmp: {},
@@ -108,7 +119,7 @@
       const emp = empKey(a.EmployeeId);
       const streak = String(a.CountsAgainstStreak || "").trim();
       const fp = Number(a.FinalPoints) || 0;
-      const qualifies = streak === "Force Yes" || (streak === "Auto" && fp > 0);
+      const qualifies = streak === "Force Yes" || (streak === "Auto" && fp > idx.awardResetPointThreshold);
       if (!emp || !qualifies) return;
       const d = DS.parseDate(a.AccidentDate);
       if (!d) return;
@@ -136,13 +147,27 @@
        otherwise last physical + 2 years. Employees with no physical on
        record return null (not flagged here — that's a separate
        "who is required to have one" question). */
+    /* Physical: Primary drivers (the default) are required to have one, so a
+       Primary with none on record is "Missing" (overdue-level). Secondary
+       drivers aren't required — a missing physical isn't a violation, but an
+       expiring one is still surfaced (lower priority). Due date is the
+       per-employee expiration if present, else last physical + fallback years. */
     physicalFor(cache, emp) {
+      const r = cache.idx.rosterByEmp[emp] || {};
+      const required = String(r.DriverStatus || "Primary") !== "Secondary";  // default Primary = required
       const p = cache.idx.physLatest[emp];
-      if (!p) return { dueDate: null, has: false };
+      const today = startOfToday();
+      if (!p) {
+        return { has: false, required, dueDate: null,
+                 missing: required, overdue: required,
+                 status: required ? "Missing" : "None on record" };
+      }
       const exp = DS.parseDate(p.ExpirationDate);
       const pd = DS.parseDate(p.PhysicalDate);
-      const dueDate = exp || (pd ? addYears(pd, 2) : null);
-      return { dueDate, has: true, lastDate: pd, fromExpiry: !!exp };
+      const dueDate = exp || (pd ? addYears(pd, cache.idx.physicalDefaultYears) : null);
+      const overdue = !!dueDate && dueDate < today;
+      return { has: true, required, dueDate, missing: false, overdue,
+               lastDate: pd, fromExpiry: !!exp, status: overdue ? "Overdue" : "Current" };
     },
 
     /* Courses: cycle status + due date, using the required-course set. */
@@ -156,11 +181,11 @@
       let status, dueDate;
       if (anyBlank) {
         status = allBlank ? "Not started" : "Incomplete";
-        dueDate = hire ? addYears(hire, 1) : null;   // 1-year grace from hire
+        dueDate = hire ? addMonths(hire, cache.idx.courseGraceMonths) : null;   // grace from hire
       } else {
         status = "Renewal due";
         const minTime = Math.min.apply(null, dates.map(d => d.getTime()));
-        dueDate = addYears(new Date(minTime), 3);      // 3-year renewal cycle
+        dueDate = addYears(new Date(minTime), cache.idx.courseRenewalYears);      // renewal cycle
       }
       return { status, dueDate };
     },
@@ -170,7 +195,7 @@
       const hire = DS.parseDate((cache.idx.rosterByEmp[emp] || {}).HireDate);
       const reset = cache.idx.qualResetDate[emp] || hire;
       const highest = cache.idx.highestAward[emp] || 0;
-      const next = highest + 5;
+      const next = highest + cache.idx.awardMilestoneYears;
       const eligibleDate = reset ? addYears(reset, next) : null;
       const eligible = !!eligibleDate && eligibleDate <= startOfToday();
       return { nextMilestone: next, highest, resetDate: reset, eligibleDate, eligible };
@@ -184,11 +209,24 @@
       cache.idx.activeRoster.forEach(r => {
         const emp = empKey(r.EmployeeId);
         const s = this.physicalFor(cache, emp);
-        if (s.dueDate && s.dueDate <= cutoff) {
-          out.push({ employeeId: emp, name: r.Title, dueDate: s.dueDate, overdue: s.dueDate < today });
-        }
+        let urgency = null;
+        if (s.required && s.missing) urgency = "missing";               // Primary, none on record
+        else if (s.dueDate && s.dueDate <= cutoff) urgency = s.overdue ? "overdue" : "due";
+        if (!urgency) return;                                            // Secondary w/ no physical is not flagged here
+        out.push({
+          employeeId: emp, name: r.Title, dueDate: s.dueDate,
+          required: s.required, urgency,
+          overdue: urgency === "overdue" || urgency === "missing",
+        });
       });
-      out.sort((a, b) => a.dueDate - b.dueDate);
+      const rank = u => ({ missing: 0, overdue: 1, due: 2 }[u]);
+      out.sort((a, b) => {
+        if (a.required !== b.required) return a.required ? -1 : 1;      // Primary first
+        if (rank(a.urgency) !== rank(b.urgency)) return rank(a.urgency) - rank(b.urgency);
+        const ad = a.dueDate ? a.dueDate.getTime() : Infinity;
+        const bd = b.dueDate ? b.dueDate.getTime() : Infinity;
+        return ad - bd;
+      });
       return out;
     },
 

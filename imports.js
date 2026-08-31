@@ -150,8 +150,6 @@
         Supervisor: String(row[iSup] || ""),
         HireDate: hire,
         Rank: String(row[iRank] || ""),
-        DriverStatus: "Primary",
-        ActiveEmployee: true,
       });
     }
     const warnings = [];
@@ -215,7 +213,7 @@
       },
     },
     roster: {
-      label: "Roster", list: () => DS.LISTS.roster, mode: "replace",
+      label: "Roster", list: () => DS.LISTS.roster, mode: "upsert",
       parse: (wb) => parseRoster(wb),
       cols: [["Name", "Title"], ["ID", "EmployeeId"], ["Division", "Division"], ["Rank", "Rank"]],
     },
@@ -265,8 +263,8 @@
     const t = TYPES[state.type];
 
     // mode note
-    const note = el("div", { class: "import-note" + (t.mode === "replace" ? " warn" : "") });
-    if (t.mode === "replace") note.textContent = "Roster import replaces every current roster record with the uploaded file.";
+    const note = el("div", { class: "import-note" });
+    if (t.mode === "upsert") note.textContent = "Updates existing employees and adds new ones. Driver designations (Primary / Secondary / Non-Driver) are preserved — never overwritten by an import.";
     else if (t.mode === "append-dedup") note.textContent = "New records are added; rows that already exist are skipped.";
     else note.textContent = "New records are added to the list.";
     container.appendChild(note);
@@ -309,6 +307,24 @@
       const { records, warnings } = t.parse(wb, state.ctx);
       if (!records.length) { renderMsg(result, "No records found in that file. Check that it's the right export.", "warn"); return; }
 
+      if (t.mode === "upsert") {
+        DS.showLoading(result, "Comparing with the current roster…");
+        const existing = await DS.spGet(DS.LISTS.roster, { select: ["Id", "EmployeeId"] });
+        const existingMap = {};
+        existing.forEach(e => { const k = String(e.EmployeeId || "").trim(); if (k) existingMap[k] = e; });
+        const fileIds = new Set(records.map(r => String(r.EmployeeId).trim()));
+        const toUpdate = [], toCreate = [];
+        records.forEach(r => {
+          const k = String(r.EmployeeId).trim();
+          if (existingMap[k]) toUpdate.push({ id: existingMap[k].Id, fields: r });
+          else toCreate.push(r);
+        });
+        const toInactivate = existing.filter(e => { const k = String(e.EmployeeId || "").trim(); return k && !fileIds.has(k); });
+        state.parsed = { mode: "upsert", records, toUpdate, toCreate, toInactivate, warnings, fileName: file.name };
+        renderPreview(result, container);
+        return;
+      }
+
       // dedup preview
       let toWrite = records, dupCount = 0;
       if (t.mode === "append-dedup" && t.existingKeys) {
@@ -333,41 +349,96 @@
       el("h3", { text: p.fileName }),
       el("span", { class: "count-pill", text: p.records.length + " row(s) parsed" }),
     ]);
-
-    // summary line
-    let summary;
-    if (t.mode === "replace") summary = "Will replace all roster records with these " + p.toWrite.length + ".";
-    else if (t.mode === "append-dedup") summary = p.toWrite.length + " new · " + p.dupCount + " already on file (skipped).";
-    else summary = "Will add " + p.toWrite.length + " record(s).";
-
     const body = el("div", { class: "card__body" });
-    body.appendChild(el("div", { class: "import-note", text: summary }));
+
+    let sample = p.records.slice(0, 8);
+    let confirmLabel, doRun, inactivateCb = null;
+
+    if (p.mode === "upsert") {
+      body.appendChild(el("div", { class: "import-note", text:
+        p.toUpdate.length + " existing updated \u00b7 " + p.toCreate.length + " new \u00b7 designations preserved." }));
+      if (p.toInactivate.length) {
+        const wrap = el("label", { class: "check", style: "margin:2px 0 12px" });
+        inactivateCb = el("input", { type: "checkbox" }); inactivateCb.checked = true;
+        wrap.appendChild(inactivateCb);
+        wrap.appendChild(el("span", { text: "Mark " + p.toInactivate.length + " employee(s) not in this file as inactive" }));
+        body.appendChild(wrap);
+        body.appendChild(el("div", { class: "import-note warn", text:
+          "That count should roughly match recent separations. If it's unexpectedly large, this may be only a partial roster \u2014 uncheck the box." }));
+      }
+      confirmLabel = "Apply roster update";
+      doRun = () => runUpsert(result, container, inactivateCb ? inactivateCb.checked : false);
+    } else {
+      let summary;
+      if (t.mode === "append-dedup") summary = p.toWrite.length + " new \u00b7 " + p.dupCount + " already on file (skipped).";
+      else summary = "Will add " + p.toWrite.length + " record(s).";
+      body.appendChild(el("div", { class: "import-note", text: summary }));
+      sample = p.toWrite.slice(0, 8);
+      confirmLabel = "Import (" + p.toWrite.length + ")";
+      doRun = () => runImport(result, container);
+    }
+
     (p.warnings || []).forEach(w => body.appendChild(el("div", { class: "import-note warn", text: w })));
 
-    // preview table (first 8)
+    // preview table
     const cols = t.cols;
-    const sample = p.toWrite.slice(0, 8);
     if (sample.length) {
       body.appendChild(el("table", { class: "tbl", style: "margin-top:6px" }, [
         el("thead", null, el("tr", null, cols.map(c => el("th", { text: c[0] })))),
         el("tbody", null, sample.map(r => el("tr", null, cols.map(c => {
           let v = r[c[1]];
-          if (/date/i.test(c[1]) || c[1] === "PhysicalDate" || c[1] === "ExpirationDate" || c[1] === "AccidentDate" || c[1] === "DateCompleted")
-            v = DS.fmtDate(v);
+          if (/date/i.test(c[1])) v = DS.fmtDate(v);
           return el("td", { text: v == null || v === "" ? "—" : String(v) });
         })))),
       ]));
     }
 
-    // action row
-    const confirmBtn = el("button", { class: "btn", text: (t.mode === "replace" ? "Replace roster" : "Import") + " (" + p.toWrite.length + ")" });
-    confirmBtn.disabled = p.toWrite.length === 0;
+    const confirmBtn = el("button", { class: "btn", text: confirmLabel });
+    confirmBtn.disabled = (p.mode !== "upsert" && p.toWrite.length === 0);
     const cancelBtn = el("button", { class: "btn btn--ghost", text: "Cancel" });
     cancelBtn.addEventListener("click", () => { state.parsed = null; document.getElementById("importResult").innerHTML = ""; });
-    confirmBtn.addEventListener("click", () => runImport(result, container));
+    confirmBtn.addEventListener("click", doRun);
     body.appendChild(el("div", { style: "display:flex; gap:10px; margin-top:18px" }, [confirmBtn, cancelBtn]));
 
     result.appendChild(el("div", { class: "card" }, [head, body]));
+  }
+
+  async function runUpsert(result, container, doInactivate) {
+    const p = state.parsed;
+    const listName = DS.LISTS.roster;
+    const ops = [];
+    // update existing: org fields + reactivate; NEVER DriverStatus → designation preserved
+    p.toUpdate.forEach(u => ops.push({ kind: "update", id: u.id, fields: Object.assign({}, u.fields, { ActiveEmployee: true }) }));
+    // new hires: default designation Primary, active
+    p.toCreate.forEach(r => ops.push({ kind: "create", fields: Object.assign({}, r, { DriverStatus: "Primary", ActiveEmployee: true }) }));
+    // departures: mark inactive (keeps the record + its designation for a possible return)
+    if (doInactivate) p.toInactivate.forEach(e => ops.push({ kind: "update", id: e.Id, fields: { ActiveEmployee: false } }));
+
+    result.innerHTML = "";
+    const bar = el("div", { class: "progress" }, el("div", { class: "progress__bar" }));
+    const barFill = bar.firstChild;
+    const status = el("div", { style: "font-size:13px; color:var(--slate)" });
+    result.appendChild(el("div", { class: "card" }, el("div", { class: "card__body" }, [
+      el("h3", { text: "Updating roster…", style: "font-size:15px; margin-bottom:10px" }), bar, status,
+    ])));
+
+    const errors = await runBatched(ops, async op => {
+      if (op.kind === "create") await DS.spCreate(listName, op.fields);
+      else await DS.spUpdate(listName, op.id, op.fields);
+    }, (done, total) => { barFill.style.width = (total ? done / total * 100 : 100) + "%"; status.textContent = "Processing " + done + " of " + total + "…"; });
+
+    const updated = p.toUpdate.length, created = p.toCreate.length, inactivated = doInactivate ? p.toInactivate.length : 0;
+    await DS.audit("Roster import", listName, null,
+      updated + " updated, " + created + " new, " + inactivated + " inactivated; designations preserved");
+    DS.data.clear();
+    const errCount = errors.length;
+    renderMsg(result,
+      "Roster updated \u2014 " + updated + " existing updated, " + created + " added, " + inactivated + " marked inactive." +
+      (errCount ? " " + errCount + " operation(s) failed (see console)." : " Designations were preserved."),
+      errCount ? "warn" : "ok");
+    if (errCount) console.warn("Roster upsert errors:", errors.map(e => e.message));
+    DS.toast("Roster update complete.", errCount ? "error" : "success");
+    state.parsed = null;
   }
 
   async function runImport(result, container) {

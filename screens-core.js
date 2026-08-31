@@ -37,6 +37,28 @@
     return DS.badge(DS.fmtDate(dueDate), overdue ? "overdue" : "due");
   }
 
+  // dashboard physicals: urgency-aware badge
+  function physBadge(row) {
+    if (row.urgency === "missing") return DS.badge("Missing", "overdue");
+    if (row.urgency === "overdue") return DS.badge("Overdue \u00b7 " + DS.fmtDate(row.dueDate), "overdue");
+    return DS.badge(DS.fmtDate(row.dueDate), "due");
+  }
+  // driver-status cell (Secondary de-emphasized)
+  function driverCell(required) {
+    return required
+      ? el("span", { text: "Primary" })
+      : el("span", { style: "color:var(--muted)", text: "Secondary" });
+  }
+  // roster detail physical row, required-aware
+  function physicalDetailBadge(phys) {
+    if (!phys.applicable) return DS.badge("Not applicable (Non-Driver)", "neutral");
+    if (!phys.has) return phys.required
+      ? DS.badge("Required \u2014 none on record", "overdue")
+      : DS.badge("Not required \u2014 none on record", "neutral");
+    if (phys.overdue) return DS.badge("Overdue \u00b7 " + DS.fmtDate(phys.dueDate), "overdue");
+    return DS.badge(DS.fmtDate(phys.dueDate), phys.required ? "due" : "neutral");
+  }
+
   /* ============================================================
      DASHBOARD
      ============================================================ */
@@ -45,15 +67,18 @@
     const physicals = DS.compute.physicalsDue(cache);
     const courses = DS.compute.coursesDue(cache);
     const awards = DS.compute.awardsEligible(cache);
+    const restricted = DS.compute.drivingRestricted(cache);
 
     container.innerHTML = "";
 
     // stat row
-    const overduePhys = physicals.filter(p => p.overdue).length;
+    const criticalPhys = physicals.filter(p => p.urgency === "missing" || p.urgency === "overdue").length;
+    const noDriving = restricted.filter(r => r.status === "No-Driving").length;
     container.appendChild(el("div", { class: "stats" }, [
-      statCard(physicals.length, "Physicals coming due", overduePhys ? "overdue" : "due"),
+      statCard(physicals.length, "Physicals due or missing", criticalPhys ? "overdue" : "due"),
       statCard(courses.length, "Courses coming due", courses.some(c => c.overdue) ? "overdue" : "due"),
       statCard(awards.length, "Awards eligible now", "clear"),
+      statCard(restricted.length, "On restricted / no-driving", noDriving ? "overdue" : "due"),
     ]));
 
     const grid = el("div", { class: "dash-grid" });
@@ -65,8 +90,9 @@
       el("span", { class: "count-pill", text: physicals.length + (physicals.length === 1 ? " employee" : " employees") }),
       physicals.length ? buildTable([
         { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
-        { head: "Due", thClass: "nowrap", tdClass: "nowrap", render: r => dueBadge(r.dueDate, r.overdue) },
-      ], rowsWithNav(physicals)) : emptyMini("No physicals due within the alert window.")
+        { head: "Driver", render: r => driverCell(r.required) },
+        { head: "Status", thClass: "nowrap", tdClass: "nowrap", render: r => physBadge(r) },
+      ], rowsWithNav(physicals)) : emptyMini("No physicals due or missing within the alert window.")
     ));
 
     // Courses due
@@ -86,6 +112,17 @@
       el("span", { class: "count-pill", text: awards.length + (awards.length === 1 ? " employee" : " employees") }),
       awards.length ? buildTable(awardColumns(cache, container), rowsWithNav(awards, false))
         : emptyMini("No employees are award-eligible right now.")
+    ));
+
+    // Driving status (Restrictive / No-Driving)
+    grid.appendChild(card(
+      "Driving status",
+      el("span", { class: "count-pill", text: restricted.length + (restricted.length === 1 ? " employee" : " employees") }),
+      restricted.length ? buildTable([
+        { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
+        { head: "Status", render: r => DS.badge(r.status, r.status === "No-Driving" ? "overdue" : "due") },
+        { head: "Active points", thClass: "num", tdClass: "num", render: r => el("span", { class: "tnum", text: String(r.points) }) },
+      ], rowsWithNav(restricted)) : emptyMini("No employees are on restricted or no-driving status.")
     ));
   }
 
@@ -193,8 +230,13 @@
         listWrap.appendChild(buildTable([
           { head: "Name", render: r => el("span", { class: "strong", text: r.Title || "—" }) },
           { head: "ID", tdClass: "nowrap num", thClass: "num", render: r => el("span", { class: "tnum", text: r.EmployeeId || "—" }) },
-          { head: "Division", render: r => r.Division || "—" },
-          { head: "Status", render: r => DS.badge(String(r.DriverStatus || "—"), "neutral") },
+          { head: "Designation", render: r => DS.badge(DS.util.designation(r), "neutral") },
+          { head: "Driving", render: r => {
+              const d = DS.compute.drivingStatusFor(cache, DS.util.empKey(r.EmployeeId));
+              if (d.status === "No-Driving") return DS.badge("No-Driving", "overdue");
+              if (d.status === "Restrictive") return DS.badge("Restrictive", "due");
+              return el("span", { style: "color:var(--muted)", text: "—" });
+            } },
         ], tableRows));
         if (rows.length > 400) listWrap.appendChild(emptyMini("Showing first 400 — narrow the search to see the rest."));
       }
@@ -211,6 +253,7 @@
       const phys = DS.compute.physicalFor(cache, emp);
       const crs = DS.compute.coursesFor(cache, emp);
       const awd = DS.compute.awardFor(cache, emp);
+      const drive = DS.compute.drivingStatusFor(cache, emp);
       const today = DS.util.startOfToday();
 
       const body = el("div", { class: "card__body" });
@@ -221,36 +264,43 @@
       body.appendChild(detailRow("Assignment", r.Assignment || "—"));
       if (r.Supervisor) body.appendChild(detailRow("Supervisor", r.Supervisor));
 
-      body.appendChild(detailRow("Physical due",
-        phys.dueDate ? dueBadge(phys.dueDate, phys.dueDate < today) : DS.badge("None on record", "neutral")));
+      body.appendChild(detailRow("Driving eligibility",
+        drive.status === "No-Driving" ? DS.badge("No-Driving \u00b7 " + drive.points + " pts", "overdue")
+          : drive.status === "Restrictive" ? DS.badge("Restrictive \u00b7 " + drive.points + " pts", "due")
+          : DS.badge("Normal \u00b7 " + drive.points + " pts", "neutral")));
+
+      body.appendChild(detailRow("Physical", physicalDetailBadge(phys)));
       body.appendChild(detailRow("Courses",
-        crs.dueDate && crs.dueDate < today ? DS.badge(crs.status, "overdue") : DS.badge(crs.status, "neutral")));
+        !crs.applicable ? DS.badge("Not applicable (Non-Driver)", "neutral")
+          : (crs.dueDate && crs.dueDate < today ? DS.badge(crs.status, "overdue") : DS.badge(crs.status, "neutral"))));
       body.appendChild(detailRow("Next award",
         awd.eligible ? DS.badge(awd.nextMilestone + "-year (eligible)", "clear")
           : el("span", { class: "tnum", text: awd.nextMilestone + "-year · " + DS.fmtDate(awd.eligibleDate) })));
 
-      // driver status editor
+      // driver designation editor
       const editWrap = el("div", { class: "detail__edit" });
-      editWrap.appendChild(el("span", { class: "label", text: "Driver status" }));
+      editWrap.appendChild(el("span", { class: "label", text: "Driver designation" }));
       const sel = el("select", { class: "field" }, [
         el("option", { value: "Primary", text: "Primary" }),
         el("option", { value: "Secondary", text: "Secondary" }),
+        el("option", { value: "Non-Driver", text: "Non-Driver" }),
       ]);
-      sel.value = (r.DriverStatus === "Secondary") ? "Secondary" : "Primary";
+      sel.value = DS.util.designation(r);
       const saveBtn = el("button", { class: "btn btn--sm", text: "Save" });
       saveBtn.addEventListener("click", async () => {
         const val = sel.value;
-        if (val === r.DriverStatus) { DS.toast("No change to save."); return; }
+        const cur = DS.util.designation(r);
+        if (val === cur) { DS.toast("No change to save."); return; }
         saveBtn.disabled = true; saveBtn.textContent = "Saving…";
         try {
           await DS.spUpdate(DS.LISTS.roster, r.Id, { DriverStatus: val });
-          await DS.audit("Driver status changed", DS.LISTS.roster, r.EmployeeId,
-            r.Title + ": " + (r.DriverStatus || "—") + " → " + val);
+          await DS.audit("Designation changed", DS.LISTS.roster, r.EmployeeId,
+            r.Title + ": " + cur + " → " + val);
           r.DriverStatus = val;                 // update in-memory cache
           DS.toast(r.Title + " set to " + val + ".", "success");
-          paint();
+          paint(); paintDetail();
         } catch (e) {
-          DS.toast("Couldn't update status: " + e.message, "error");
+          DS.toast("Couldn't update designation: " + e.message + " — the DriverStatus choice list may need a 'Non-Driver' option.", "error");
         } finally {
           saveBtn.disabled = false; saveBtn.textContent = "Save";
         }

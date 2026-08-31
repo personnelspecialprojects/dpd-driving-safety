@@ -20,6 +20,7 @@
     ]);
     box.addEventListener("click", e => e.stopPropagation());
     backdrop.addEventListener("click", close);
+    backdrop.appendChild(box);              // <-- attach the dialog to the backdrop
     document.body.appendChild(backdrop);
     return { close, backdrop };
   }
@@ -55,6 +56,10 @@
     const physDefault = numInput(g("PhysicalDefaultYears", 2));
     const awardMilestone = numInput(g("AwardMilestoneYears", 5));
     const resetThreshold = numInput(g("AwardResetPointThreshold", 0));
+    // driving eligibility (points)
+    const rolloff = numInput(g("PointRolloffMonths", 24));
+    const restrictivePts = numInput(g("RestrictivePoints", 4));
+    const noDrivingPts = numInput(g("NoDrivingPoints", 5));
     // lists
     const required = el("textarea", { class: "field", text: String(g("RequiredCourseTitles", "Defensive Driving Basics;Defensive Driving Principles;Distracted Driving For Law Enforcement")) });
     const categories = el("input", { class: "field", type: "text", value: String(g("TicketCategories", "")), placeholder: "e.g. Physical; Course renewal; Award; General inquiry" });
@@ -79,6 +84,13 @@
         field("Physical fallback cycle (years)", physDefault, "Used only when a physical has no expiration date."),
         field("Award milestone interval (years)", awardMilestone, "Years between safe-driving award milestones."),
         field("Points that reset the award streak", resetThreshold, "An accident with more than this many final points resets the streak. 0 = any points."),
+      ]),
+
+      el("div", { class: "section-title", text: "Driving eligibility (accident points)" }),
+      el("div", { class: "field-grid" }, [
+        field("Points roll off after (months)", rolloff, "How long an accident's points stay active."),
+        field("Restrictive status at (points)", restrictivePts, "At this many active points, a driver needs a partner."),
+        field("No-driving status at (points)", noDrivingPts, "At this many active points, a driver can't drive until points roll off."),
       ]),
 
       el("div", { class: "section-title", text: "Required courses" }),
@@ -110,6 +122,9 @@
         PhysicalDefaultYears: numVal(physDefault),
         AwardMilestoneYears: numVal(awardMilestone),
         AwardResetPointThreshold: numVal(resetThreshold),
+        PointRolloffMonths: numVal(rolloff),
+        RestrictivePoints: numVal(restrictivePts),
+        NoDrivingPoints: numVal(noDrivingPts),
         RequiredCourseTitles: required.value.trim(),
         TicketCategories: categories.value.trim(),
         DigestRecipients: recipients.value.trim(),

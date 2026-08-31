@@ -25,6 +25,14 @@
     return d.toLocaleString("en-US", { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
   };
 
+  /* ---- driver designation (job-duty; manually maintained) ---- */
+  function designation(r) {
+    const s = String((r && r.DriverStatus) || "Primary").trim();
+    return (s === "Secondary" || s === "Non-Driver") ? s : "Primary";  // default Primary
+  }
+  function physicalRequired(r) { return designation(r) === "Primary"; }             // only Primary
+  function courseRequired(r) { return designation(r) !== "Non-Driver"; }            // Primary + Secondary
+
   /* ---- misc row helpers ---- */
   function empKey(v) { return String(v == null ? "" : v).trim(); }
   function isActive(r) {
@@ -77,6 +85,11 @@
       physicalDefaultYears: cfgNum(config, "PhysicalDefaultYears", 2),
       awardMilestoneYears: cfgNum(config, "AwardMilestoneYears", 5),
       awardResetPointThreshold: cfgNum(config, "AwardResetPointThreshold", 0),
+      // driving-eligibility (point-based, rolling window)
+      pointRolloffMonths: cfgNum(config, "PointRolloffMonths", 24),
+      restrictivePoints: cfgNum(config, "RestrictivePoints", 4),
+      noDrivingPoints: cfgNum(config, "NoDrivingPoints", 5),
+      activePoints: {},     // emp -> sum of FinalPoints within the roll-off window
       // required courses + tickets
       requiredTitles: String(config.RequiredCourseTitles || DEFAULT_COURSES)
         .split(";").map(t => t.trim()).filter(Boolean),
@@ -115,15 +128,19 @@
       if (!cur || (d && (!curD || d > curD))) idx.physLatest[emp] = p;
     });
 
+    const ptsCutoff = addMonths(startOfToday(), -idx.pointRolloffMonths);
     cache.accidents.forEach(a => {
       const emp = empKey(a.EmployeeId);
+      if (!emp) return;
       const streak = String(a.CountsAgainstStreak || "").trim();
       const fp = Number(a.FinalPoints) || 0;
-      const qualifies = streak === "Force Yes" || (streak === "Auto" && fp > idx.awardResetPointThreshold);
-      if (!emp || !qualifies) return;
       const d = DS.parseDate(a.AccidentDate);
       if (!d) return;
-      if (!idx.qualResetDate[emp] || d > idx.qualResetDate[emp]) idx.qualResetDate[emp] = d;
+      // awards: streak reset on a qualifying accident
+      const qualifies = streak === "Force Yes" || (streak === "Auto" && fp > idx.awardResetPointThreshold);
+      if (qualifies && (!idx.qualResetDate[emp] || d > idx.qualResetDate[emp])) idx.qualResetDate[emp] = d;
+      // driving points: sum within roll-off window, excluding accidents forced not to count
+      if (streak !== "Force No" && d >= ptsCutoff) idx.activePoints[emp] = (idx.activePoints[emp] || 0) + fp;
     });
 
     cache.awards.forEach(a => {
@@ -154,30 +171,34 @@
        per-employee expiration if present, else last physical + fallback years. */
     physicalFor(cache, emp) {
       const r = cache.idx.rosterByEmp[emp] || {};
-      const required = String(r.DriverStatus || "Primary") !== "Secondary";  // default Primary = required
+      const desig = designation(r);
+      const required = desig === "Primary";        // only Primary requires a physical
+      const applicable = desig !== "Non-Driver";   // Non-Driver: physicals don't apply at all
       const p = cache.idx.physLatest[emp];
       const today = startOfToday();
       if (!p) {
-        return { has: false, required, dueDate: null,
+        return { has: false, required, applicable, desig, dueDate: null,
                  missing: required, overdue: required,
-                 status: required ? "Missing" : "None on record" };
+                 status: required ? "Missing" : (applicable ? "None on record" : "Not applicable") };
       }
       const exp = DS.parseDate(p.ExpirationDate);
       const pd = DS.parseDate(p.PhysicalDate);
       const dueDate = exp || (pd ? addYears(pd, cache.idx.physicalDefaultYears) : null);
       const overdue = !!dueDate && dueDate < today;
-      return { has: true, required, dueDate, missing: false, overdue,
+      return { has: true, required, applicable, desig, dueDate, missing: false, overdue,
                lastDate: pd, fromExpiry: !!exp, status: overdue ? "Overdue" : "Current" };
     },
 
     /* Courses: cycle status + due date, using the required-course set. */
     coursesFor(cache, emp) {
+      const r = cache.idx.rosterByEmp[emp] || {};
+      const applicable = designation(r) !== "Non-Driver";   // courses don't apply to Non-Drivers
       const req = cache.idx.requiredTitles;
       const cm = cache.idx.courseLatest[emp] || {};
       const dates = req.map(t => cm[t] || null);
       const anyBlank = dates.some(d => !d);
       const allBlank = dates.every(d => !d);
-      const hire = DS.parseDate((cache.idx.rosterByEmp[emp] || {}).HireDate);
+      const hire = DS.parseDate(r.HireDate);
       let status, dueDate;
       if (anyBlank) {
         status = allBlank ? "Not started" : "Incomplete";
@@ -187,7 +208,16 @@
         const minTime = Math.min.apply(null, dates.map(d => d.getTime()));
         dueDate = addYears(new Date(minTime), cache.idx.courseRenewalYears);      // renewal cycle
       }
-      return { status, dueDate };
+      return { status, dueDate, applicable };
+    },
+
+    /* Driving eligibility from active points (rolling window). */
+    drivingStatusFor(cache, emp) {
+      const pts = cache.idx.activePoints[emp] || 0;
+      let status = "Normal";
+      if (pts >= cache.idx.noDrivingPoints) status = "No-Driving";
+      else if (pts >= cache.idx.restrictivePoints) status = "Restrictive";
+      return { points: pts, status };
     },
 
     /* Award: next milestone + the date it's reached. */
@@ -209,6 +239,7 @@
       cache.idx.activeRoster.forEach(r => {
         const emp = empKey(r.EmployeeId);
         const s = this.physicalFor(cache, emp);
+        if (!s.applicable) return;                                     // Non-Driver: physicals don't apply
         let urgency = null;
         if (s.required && s.missing) urgency = "missing";               // Primary, none on record
         else if (s.dueDate && s.dueDate <= cutoff) urgency = s.overdue ? "overdue" : "due";
@@ -237,11 +268,27 @@
       cache.idx.activeRoster.forEach(r => {
         const emp = empKey(r.EmployeeId);
         const s = this.coursesFor(cache, emp);
+        if (!s.applicable) return;                                     // Non-Driver: courses don't apply
         if (s.dueDate && s.dueDate <= cutoff) {
           out.push({ employeeId: emp, name: r.Title, dueDate: s.dueDate, status: s.status, overdue: s.dueDate < today });
         }
       });
       out.sort((a, b) => a.dueDate - b.dueDate);
+      return out;
+    },
+
+    /* Employees currently on Restrictive or No-Driving status. */
+    drivingRestricted(cache) {
+      const out = [];
+      cache.idx.activeRoster.forEach(r => {
+        const emp = empKey(r.EmployeeId);
+        const s = this.drivingStatusFor(cache, emp);
+        if (s.status !== "Normal") out.push({ employeeId: emp, name: r.Title, points: s.points, status: s.status });
+      });
+      out.sort((a, b) => {
+        if (a.status !== b.status) return a.status === "No-Driving" ? -1 : 1;  // No-Driving first
+        return b.points - a.points;
+      });
       return out;
     },
 
@@ -260,6 +307,6 @@
   };
 
   /* small shared exports for screens */
-  DS.util = { addYears, addDays, startOfToday, empKey, isActive };
+  DS.util = { addYears, addMonths, addDays, startOfToday, empKey, isActive, designation, physicalRequired, courseRequired };
 
 })();

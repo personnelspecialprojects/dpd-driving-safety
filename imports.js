@@ -504,5 +504,6 @@
 
   DS.registerScreen("imports", { title: "Imports", icon: "▾", render: renderImports });
   DS.ensureXlsx = ensureXlsx;   // shared with the reports export
+  DS.runBatched = runBatched;   // shared with the legacy migration tool
 
 })();

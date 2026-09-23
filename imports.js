@@ -188,6 +188,34 @@
     return { records, warnings };
   }
 
+  /* ---- what each upload's real column headers look like, shown on hover ---- */
+  const FORMAT_SPECS = {
+    courses: {
+      source: "PoliceOne / Lexipol course completion export",
+      columns: ["Badge/ID #", "Course Title", "Completion Status", "Date Completed", "Score", "Attempts"],
+      sample: ["123456", "Defensive Driving Basics", "Passed", "3/12/2026", "94", "1"],
+      note: 'Only rows marked "Passed" for a required course are imported.',
+    },
+    accidents: {
+      source: "Origami Risk — DPD Equipment Incidents export",
+      columns: ["Incident Number", "Loss Date", "Employee Number", "IRC Decision", "IRC/IAB Final Decision", "Accident Street1", "Vehicle", "Vehicle Make", "Vehicle Model"],
+      sample: ["INC-48213", "3/2/2026", "123456", "2 pts", "2 pts", "Main St", "1", "Ford", "Explorer"],
+      note: "Deduped by Incident Number — safe to re-upload the same export.",
+    },
+    roster: {
+      source: '"Employees with Supervisors by Working Org" report',
+      columns: ["Emp #", "LastName", "FirstName", "Rank", "Working Org", "Working Workgroup", "1st Line Supervisor", "Hire Date"],
+      sample: ["123456", "Smith", "Jordan", "Police Officer", "1498", "Patrol", "Garcia, M.", "6/1/2022"],
+      note: "Driver designation (Primary/Secondary/Non-Driver) is never touched by this import.",
+    },
+    physicals: {
+      source: 'Driver physicals report (sheet "Data")',
+      columns: ["Date Tested", "Employee Number", "Driver Physical Test Results", "Phy Exp Date", "Clinic Location"],
+      sample: ["7/1/2026", "123456", "Pass", "6/30/2028", "Wheatland"],
+      note: "Needs ExpirationDate and Result columns added to DrivingSafety_Physicals.",
+    },
+  };
+
   /* ============================================================
      IMPORT TYPES — parser + write strategy per type
      ============================================================ */
@@ -275,9 +303,11 @@
     }
 
     // dropzone
+    const dzTitle = el("h3", { text: "Drop the " + t.label.toLowerCase() + " Excel file here" });
+    dzTitle.appendChild(DS.formatHint(FORMAT_SPECS[state.type]));
     const dz = el("div", { class: "dropzone" }, [
       el("div", { class: "dz-ico", text: "⬆" }),
-      el("h3", { text: "Drop the " + t.label.toLowerCase() + " Excel file here" }),
+      dzTitle,
       el("p", { text: "or click to choose a file (.xlsx)" }),
     ]);
     const fileInput = el("input", { type: "file", accept: ".xlsx,.xls", style: "display:none" });

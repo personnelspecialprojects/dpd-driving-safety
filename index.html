@@ -394,6 +394,33 @@ textarea.field { resize: vertical; min-height: 74px; line-height: 1.45; }
 .flag-row .choices button.picked { background: var(--navy-700); color: #fff; border-color: var(--navy-700); }
 .migrate-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 18px; }
 
+/* ---- Format hint tooltip (hover/focus reminder on upload dropzones) ---- */
+.format-hint { position: relative; display: inline-flex; vertical-align: middle; margin-left: 8px; }
+.format-hint__btn {
+  width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line);
+  background: var(--canvas); color: var(--slate); font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; cursor: help; line-height: 1; padding: 0;
+}
+.format-hint__btn:hover, .format-hint__btn:focus-visible { background: var(--navy-100); border-color: var(--navy-300); color: var(--navy-700); outline: none; }
+.format-hint__pop {
+  position: absolute; top: 26px; left: 0; z-index: 40; width: max-content; max-width: 360px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius-lg);
+  box-shadow: 0 10px 30px rgba(15,30,56,.16); padding: 12px 14px; text-align: left;
+  opacity: 0; pointer-events: none; transform: translateY(-4px);
+  transition: opacity .12s ease, transform .12s ease;
+}
+.format-hint:hover .format-hint__pop, .format-hint:focus-within .format-hint__pop { opacity: 1; pointer-events: auto; transform: translateY(0); }
+.format-hint__source { font-size: 11.5px; color: var(--slate); margin-bottom: 8px; }
+.format-hint__seclabel { font-size: 11px; font-weight: 600; color: var(--ink); margin: 8px 0 4px; }
+.format-hint__seclabel:first-child { margin-top: 0; }
+.format-hint__scroll { overflow-x: auto; }
+.format-hint__tbl { border-collapse: collapse; font-size: 11px; white-space: nowrap; }
+.format-hint__tbl th, .format-hint__tbl td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; }
+.format-hint__tbl th { background: var(--navy-100); color: var(--navy-700); font-weight: 600; }
+.format-hint__tbl td { color: var(--slate); }
+.format-hint__note { font-size: 11.5px; color: var(--muted); margin-top: 8px; max-width: 320px; white-space: normal; }
+@media (max-width: 480px) { .format-hint__pop { left: auto; right: -8px; max-width: 82vw; } }
+
 /* ---- Responsive ---- */
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; }
@@ -539,6 +566,38 @@ DS.showLoading = function (container, label) {
 /* ---- status badge ---- */
 DS.badge = function (text, kind) {
   return DS.el("span", { class: "badge badge--" + (kind || "neutral"), text: text });
+};
+
+/* ---- format hint: a small "?" next to an upload title that shows the
+   expected columns on hover/focus. Pure CSS show/hide (:hover, :focus-within)
+   — no listeners to clean up as screens re-render.
+   opts: { source, columns, sample, note } for one table, or
+         { source, sections: [{label, columns, sample}], note } for several. */
+DS.formatHint = function (opts) {
+  const wrap = DS.el("span", { class: "format-hint" });
+  const btn = DS.el("button", {
+    class: "format-hint__btn", type: "button", text: "?",
+    "aria-label": "Expected file format" + (opts.source ? " — " + opts.source : ""),
+  });
+  // Stop clicks from bubbling into a parent dropzone's "click to browse" handler.
+  btn.addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); });
+  wrap.addEventListener("click", e => e.stopPropagation());
+
+  const pop = DS.el("div", { class: "format-hint__pop" });
+  if (opts.source) pop.appendChild(DS.el("div", { class: "format-hint__source", text: opts.source }));
+  const sections = opts.sections || [{ label: null, columns: opts.columns, sample: opts.sample }];
+  sections.forEach(sec => {
+    if (sec.label) pop.appendChild(DS.el("div", { class: "format-hint__seclabel", text: sec.label }));
+    const rows = [DS.el("thead", null, DS.el("tr", null, sec.columns.map(c => DS.el("th", { text: c }))))];
+    if (sec.sample && sec.sample.length) rows.push(DS.el("tbody", null, DS.el("tr", null, sec.sample.map(s => DS.el("td", { text: s })))));
+    const scroll = DS.el("div", { class: "format-hint__scroll" }, DS.el("table", { class: "format-hint__tbl" }, rows));
+    pop.appendChild(scroll);
+  });
+  if (opts.note) pop.appendChild(DS.el("div", { class: "format-hint__note", text: opts.note }));
+
+  wrap.appendChild(btn);
+  wrap.appendChild(pop);
+  return wrap;
 };
 
 /* ---- dates ---- */

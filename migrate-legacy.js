@@ -297,6 +297,23 @@
     return { rosterN, physN, courseN, errors };
   }
 
+  /* ---- what each upload's real column headers look like, shown on hover ---- */
+  const STATUS_FORMAT = {
+    source: "Safety Team Main spreadsheet — current status roster",
+    columns: ["Last Name", "First Name", "Emp#", "Badge", "Rank", "Driver Physical Date", "Defensive Driving Date", "Future verified"],
+    sample: ["Smith", "Jordan", "123456", "4821", "Police Officer", "3/1/2027", "Non-Primary", ""],
+    note: 'The physical/DD columns hold either a due date or a status note (e.g. "Non-Primary", "Non-Driver").',
+  };
+  const HISTORY_FORMAT = {
+    source: "Reference physicals workbook — sheet names matched loosely",
+    sections: [
+      { label: "Master List / Add to Main Spreadsheet", columns: ["Test Date", "Last, First", "Employee ID", "Result", "Expiration Date"], sample: ["4/5/2022", "Smith, Jordan", "123456", "Pass", "4/4/2024"] },
+      { label: "New Hires", columns: ["Test Date", "Last Name", "First Name", "Result", "Expiration Date"], sample: ["5/1/2025", "Smith", "Jordan", "Pass", "5/1/2027"] },
+      { label: "Pending", columns: ["Date", "First Last", "Employee ID", "Status", "Note"], sample: ["1/25/2024", "Jordan Smith", "123456", "Pending", ""] },
+    ],
+    note: "No header row in these sheets — data starts on row 1. New Hires has no Employee ID, so those rows match by name.",
+  };
+
   /* ---------------- screen ---------------- */
   let state = { statusRows: null, history: null, pendingRows: null, foundSheets: [], plan: null, unmatchedHistory: 0, resolutions: {} };
 
@@ -309,12 +326,12 @@
     dropRow.appendChild(buildDrop("Safety Team Main spreadsheet", "Current status — Last Name, First Name, Emp#, Driver Physical Date, Defensive Driving Date", async (wb) => {
       state.statusRows = parseStatusRoster(wb);
       redraw();
-    }));
+    }, STATUS_FORMAT));
     dropRow.appendChild(buildDrop("Reference physicals workbook", "Master List / Add to Main Spreadsheet / New Hires / Pending — optional but recommended", async (wb) => {
       const h = parseHistoryWorkbook(wb);
       state.history = h.examLog; state.pendingRows = h.pendingRows; state.foundSheets = h.foundSheets;
       redraw();
-    }));
+    }, HISTORY_FORMAT));
     container.appendChild(dropRow);
 
     const resultWrap = el("div", { id: "migrateResult" });
@@ -324,10 +341,12 @@
     redraw();
   }
 
-  function buildDrop(title, sub, onFile) {
+  function buildDrop(title, sub, onFile, formatSpec) {
+    const h3 = el("h3", { text: title });
+    if (formatSpec) h3.appendChild(DS.formatHint(formatSpec));
     const dz = el("div", { class: "dropzone" }, [
       el("div", { class: "dz-ico", text: "⬆" }),
-      el("h3", { text: title }),
+      h3,
       el("p", { text: sub }),
     ]);
     const input = el("input", { type: "file", accept: ".xlsx,.xls", style: "display:none" });

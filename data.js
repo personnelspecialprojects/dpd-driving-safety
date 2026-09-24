@@ -102,7 +102,10 @@
       physLatest: {},       // emp -> physical record (most recent by PhysicalDate)
       qualResetDate: {},    // emp -> Date (latest qualifying accident)
       highestAward: {},     // emp -> number
+      // raw per-employee records, for the Roster detail "Records" section
+      coursesByEmp: {}, physicalsByEmp: {}, accidentsByEmp: {},
     };
+    function pushTo(map, emp, rec) { (map[emp] = map[emp] || []).push(rec); }
 
     cache.roster.forEach(r => {
       const emp = empKey(r.EmployeeId);
@@ -114,6 +117,7 @@
       const emp = empKey(c.EmployeeId);
       const title = String(c.CourseTitle || "").trim();
       const d = DS.parseDate(c.DateCompleted);
+      if (emp) pushTo(idx.coursesByEmp, emp, c);
       if (!emp || !title || !d) return;
       const m = (idx.courseLatest[emp] = idx.courseLatest[emp] || {});
       if (!m[title] || d > m[title]) m[title] = d;
@@ -123,15 +127,18 @@
       const emp = empKey(p.EmployeeId);
       const d = DS.parseDate(p.PhysicalDate);
       if (!emp) return;
+      pushTo(idx.physicalsByEmp, emp, p);
       const cur = idx.physLatest[emp];
       const curD = cur ? DS.parseDate(cur.PhysicalDate) : null;
       if (!cur || (d && (!curD || d > curD))) idx.physLatest[emp] = p;
     });
 
     const ptsCutoff = addMonths(startOfToday(), -idx.pointRolloffMonths);
+    idx.ptsCutoff = ptsCutoff;
     cache.accidents.forEach(a => {
       const emp = empKey(a.EmployeeId);
       if (!emp) return;
+      pushTo(idx.accidentsByEmp, emp, a);
       const streak = String(a.CountsAgainstStreak || "").trim();
       const fp = Number(a.FinalPoints) || 0;
       const d = DS.parseDate(a.AccidentDate);
@@ -217,6 +224,18 @@
       let status = "Normal";
       if (pts >= cache.idx.noDrivingPoints) status = "No-Driving";
       else if (pts >= cache.idx.restrictivePoints) status = "Restrictive";
+      // Manual override (Roster columns DrivingOverride / DrivingOverrideUntil /
+      // DrivingOverrideNote) — for restrictions points can't express (e.g. medical)
+      // or to clear a points-based status. Expires automatically after its end date.
+      const r = cache.idx.rosterByEmp[emp] || {};
+      const ov = String(r.DrivingOverride || "").trim();
+      if (["Normal", "Restrictive", "No-Driving"].includes(ov)) {
+        const until = DS.parseDate(r.DrivingOverrideUntil);
+        if (!until || until >= startOfToday()) {
+          return { points: pts, status: ov, computed: status, override: true,
+                   overrideUntil: until, overrideNote: String(r.DrivingOverrideNote || "") };
+        }
+      }
       return { points: pts, status };
     },
 

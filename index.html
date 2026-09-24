@@ -601,18 +601,38 @@ DS.formatHint = function (opts) {
 };
 
 /* ---- dates ---- */
+/* Calendar dates are represented as LOCAL NOON so time zones can never push
+   them to the neighboring day (Dallas is 5-6 hours behind UTC). Real
+   timestamps (e.g. audit log times) keep their exact time. */
+function localNoon(y, m, d) { return new Date(y, m, d, 12, 0, 0); }
 DS.parseDate = function (v) {                       // tolerant → Date | null
   if (v == null || v === "") return null;
-  if (v instanceof Date) return isNaN(v) ? null : v;
-  if (typeof v === "number") {                      // Excel serial
-    const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 86400000);
-    return isNaN(d) ? null : d;
+  if (v instanceof Date) {
+    if (isNaN(v)) return null;
+    // Excel dates read by SheetJS land at (or a few seconds/minutes off) local
+    // midnight — snap anything within 90 minutes of midnight to its calendar day.
+    const mins = v.getHours() * 60 + v.getMinutes();
+    if (mins <= 90) return localNoon(v.getFullYear(), v.getMonth(), v.getDate());
+    if (mins >= 22 * 60 + 30) { const n = new Date(v.getTime() + 3 * 3600e3); return localNoon(n.getFullYear(), n.getMonth(), n.getDate()); }
+    return v;
+  }
+  if (typeof v === "number") {                      // Excel serial date
+    const u = new Date(Math.round((Math.floor(v) - 25569) * 86400000));
+    return isNaN(u) ? null : localNoon(u.getUTCFullYear(), u.getUTCMonth(), u.getUTCDate());
   }
   const s = String(v).trim();
-  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return new Date(+m[3], +m[1] - 1, +m[2]);
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);                       // 2026-03-12
+  if (m) return localNoon(+m[1], +m[2] - 1, +m[3]);
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})T00:00:00(\.0+)?Z$/);         // date saved as UTC midnight
+  if (m) return localNoon(+m[1], +m[2] - 1, +m[3]);
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})\b/);                 // 3/12/2026, 3/12/26, "3/12/2026 2:15 PM"
+  if (m) { let y = +m[3]; if (y < 100) y += 2000; return localNoon(y, +m[1] - 1, +m[2]); }
   const d = new Date(s);
   return isNaN(d) ? null : d;
+};
+DS.todayIso = function () {                          // today's calendar date, no snapping
+  const d = new Date();
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 };
 DS.fmtDate = function (v) {                          // → "Jun 30, 2028" | "—"
   const d = DS.parseDate(v);
@@ -743,10 +763,19 @@ DS.spGet = async function (listName, opts) {
   if (opts.expand) q.push("$expand=" + encodeURIComponent(opts.expand));
   if (opts.filter) q.push("$filter=" + encodeURIComponent(opts.filter));
   if (opts.orderby) q.push("$orderby=" + encodeURIComponent(opts.orderby));
-  q.push("$top=" + (opts.top || 5000));
-  const url = listUrl(listName) + "/items" + (q.length ? "?" + q.join("&") : "");
-  const data = await spFetch(url);
-  return data ? (data.value || []) : [];
+  // SharePoint returns at most 5,000 items per request; follow the "next page"
+  // link until we have everything (or the requested `top`).
+  const want = opts.top || Infinity;
+  q.push("$top=" + Math.min(opts.top || 5000, 5000));
+  let url = listUrl(listName) + "/items?" + q.join("&");
+  const out = [];
+  while (url && out.length < want) {
+    const data = await spFetch(url);
+    if (!data) break;
+    Array.prototype.push.apply(out, data.value || []);
+    url = data["odata.nextLink"] || data["@odata.nextLink"] || null;
+  }
+  return opts.top ? out.slice(0, opts.top) : out;
 };
 
 DS.spGetById = async function (listName, id, opts) {
@@ -758,11 +787,22 @@ DS.spGetById = async function (listName, id, opts) {
   return spFetch(url);
 };
 
+/* Date-only values ("2026-03-12") are sent as noon UTC — the same calendar day
+   everywhere in the Americas — so SharePoint never stores them a day early. */
+function spDates(fields) {
+  const out = {};
+  for (const k in fields) {
+    const v = fields[k];
+    out[k] = (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v + "T12:00:00Z" : v;
+  }
+  return out;
+}
+
 DS.spCreate = async function (listName, fields) {
   return spFetch(listUrl(listName) + "/items", {
     method: "POST",
     headers: { "Content-Type": "application/json;odata=nometadata" },
-    body: JSON.stringify(fields),
+    body: JSON.stringify(spDates(fields)),
   });
 };
 
@@ -774,7 +814,7 @@ DS.spUpdate = async function (listName, id, fields) {
       "X-HTTP-Method": "MERGE",
       "IF-MATCH": "*",
     },
-    body: JSON.stringify(fields),
+    body: JSON.stringify(spDates(fields)),
   });
 };
 

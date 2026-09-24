@@ -50,13 +50,36 @@
       : el("span", { style: "color:var(--muted)", text: "Secondary" });
   }
   // roster detail physical row, required-aware
-  function physicalDetailBadge(phys) {
+  // Is a due date inside the alert window (amber) or comfortably in the future (green)?
+  function withinLead(dueDate, leadDays) {
+    return dueDate <= DS.util.addDays(DS.util.startOfToday(), leadDays);
+  }
+
+  function physicalDetailBadge(phys, leadDays) {
     if (!phys.applicable) return DS.badge("Not applicable (Non-Driver)", "neutral");
     if (!phys.has) return phys.required
       ? DS.badge("Required \u2014 none on record", "overdue")
       : DS.badge("Not required \u2014 none on record", "neutral");
+    if (!phys.dueDate) return DS.badge("On record \u2014 no due date", "neutral");
     if (phys.overdue) return DS.badge("Overdue \u00b7 " + DS.fmtDate(phys.dueDate), "overdue");
-    return DS.badge(DS.fmtDate(phys.dueDate), phys.required ? "due" : "neutral");
+    if (withinLead(phys.dueDate, leadDays)) return DS.badge("Due " + DS.fmtDate(phys.dueDate), phys.required ? "due" : "neutral");
+    return DS.badge("Current \u00b7 next due " + DS.fmtDate(phys.dueDate), phys.required ? "clear" : "neutral");
+  }
+
+  function courseDetailBadge(crs, leadDays) {
+    if (!crs.applicable) return DS.badge("Not applicable (Non-Driver)", "neutral");
+    const today = DS.util.startOfToday();
+    const when = crs.dueDate ? DS.fmtDate(crs.dueDate) : null;
+    if (crs.doneCount === crs.requiredCount) {           // all required courses on file
+      if (!crs.dueDate) return DS.badge("Complete", "clear");
+      if (crs.dueDate < today) return DS.badge("Renewal overdue \u00b7 " + when, "overdue");
+      if (withinLead(crs.dueDate, leadDays)) return DS.badge("Renewal due " + when, "due");
+      return DS.badge("Current \u00b7 next due " + when, "clear");
+    }
+    const label = crs.status + " (" + crs.doneCount + " of " + crs.requiredCount + ")";
+    if (!crs.dueDate) return DS.badge(label + " \u00b7 no hire date", "neutral");
+    if (crs.dueDate < today) return DS.badge(label + " \u00b7 overdue", "overdue");
+    return DS.badge(label + " \u00b7 due " + when, withinLead(crs.dueDate, leadDays) ? "due" : "neutral");
   }
 
   /* ============================================================
@@ -68,62 +91,109 @@
     const courses = DS.compute.coursesDue(cache);
     const awards = DS.compute.awardsEligible(cache);
     const restricted = DS.compute.drivingRestricted(cache);
+    const unassigned = DS.compute.needsDesignation(cache);
 
     container.innerHTML = "";
 
     // stat row
     const criticalPhys = physicals.filter(p => p.urgency === "missing" || p.urgency === "overdue").length;
     const noDriving = restricted.filter(r => r.status === "No-Driving").length;
+    const needStat = statCard(unassigned.length, "Need a designation", unassigned.length ? "due" : "clear");
     container.appendChild(el("div", { class: "stats" }, [
       statCard(physicals.length, "Physicals due or missing", criticalPhys ? "overdue" : "due"),
       statCard(courses.length, "Courses coming due", courses.some(c => c.overdue) ? "overdue" : "due"),
-      statCard(awards.length, "Awards eligible now", "clear"),
+      needStat,
       statCard(restricted.length, "On restricted / no-driving", noDriving ? "overdue" : "due"),
+      statCard(awards.length, "Awards eligible now", "clear"),
     ]));
 
-    const grid = el("div", { class: "dash-grid" });
+    // 2x2 quadrants, each scrolling on its own; awards full-width underneath
+    const grid = el("div", { class: "dash-quad" });
     container.appendChild(grid);
+    const pill = n => el("span", { class: "count-pill", text: n + (n === 1 ? " employee" : " employees") });
 
-    // Physicals due
-    grid.appendChild(card(
-      "Physicals due",
-      el("span", { class: "count-pill", text: physicals.length + (physicals.length === 1 ? " employee" : " employees") }),
+    // Q1 — Physicals due
+    grid.appendChild(quad("Physicals due", pill(physicals.length),
       physicals.length ? buildTable([
         { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
         { head: "Driver", render: r => driverCell(r.required) },
         { head: "Status", thClass: "nowrap", tdClass: "nowrap", render: r => physBadge(r) },
-      ], rowsWithNav(physicals)) : emptyMini("No physicals due or missing within the alert window.")
-    ));
+      ], rowsWithNav(physicals)) : emptyMini("No physicals due or missing within the alert window.")));
 
-    // Courses due
-    grid.appendChild(card(
-      "Defensive driving due",
-      el("span", { class: "count-pill", text: courses.length + (courses.length === 1 ? " employee" : " employees") }),
+    // Q2 — Courses due
+    grid.appendChild(quad("Defensive driving due", pill(courses.length),
       courses.length ? buildTable([
         { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
         { head: "Status", render: r => DS.badge(r.status, r.status === "Not started" ? "overdue" : "neutral") },
         { head: "Due", thClass: "nowrap", tdClass: "nowrap", render: r => dueBadge(r.dueDate, r.overdue) },
-      ], rowsWithNav(courses)) : emptyMini("No courses due within the alert window.")
-    ));
+      ], rowsWithNav(courses)) : emptyMini("No courses due within the alert window.")));
 
-    // Awards eligible
-    grid.appendChild(card(
-      "Awards eligible",
-      el("span", { class: "count-pill", text: awards.length + (awards.length === 1 ? " employee" : " employees") }),
-      awards.length ? buildTable(awardColumns(cache, container), rowsWithNav(awards, false))
-        : emptyMini("No employees are award-eligible right now.")
-    ));
+    // Q3 — Needs a designation (assign right here)
+    const needPill = pill(unassigned.length);
+    let remaining = unassigned.length;
+    function assignedOne() {
+      remaining--;
+      needPill.textContent = remaining + (remaining === 1 ? " employee" : " employees");
+      needStat.firstChild.textContent = String(remaining);
+      needStat.className = "stat stat--" + (remaining ? "due" : "clear");
+    }
+    grid.appendChild(quad("Needs a designation", needPill,
+      unassigned.length ? buildTable([
+        { head: "Employee", render: r => el("span", { class: "strong", text: r.name || "\u2014" }) },
+        { head: "ID", tdClass: "nowrap", render: r => el("span", { class: "tnum", text: r.employeeId }) },
+        { head: "Assign", tdClass: "nowrap", render: r => assignSelect(r, assignedOne) },
+      ], rowsWithNav(unassigned)) : emptyMini("Everyone on the active roster has a designation.")));
 
-    // Driving status (Restrictive / No-Driving)
-    grid.appendChild(card(
-      "Driving status",
-      el("span", { class: "count-pill", text: restricted.length + (restricted.length === 1 ? " employee" : " employees") }),
+    // Q4 — Driving status
+    grid.appendChild(quad("Driving status", pill(restricted.length),
       restricted.length ? buildTable([
         { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
         { head: "Status", render: r => DS.badge(r.status, r.status === "No-Driving" ? "overdue" : "due") },
         { head: "Active points", thClass: "num", tdClass: "num", render: r => el("span", { class: "tnum", text: String(r.points) }) },
-      ], rowsWithNav(restricted)) : emptyMini("No employees are on restricted or no-driving status.")
-    ));
+      ], rowsWithNav(restricted)) : emptyMini("No employees are on restricted or no-driving status.")));
+
+    // Awards — full width below the quadrants
+    const awardsQuad = quad("Awards eligible", pill(awards.length),
+      awards.length ? buildTable(awardColumns(cache, container), rowsWithNav(awards, false))
+        : emptyMini("No employees are award-eligible right now."));
+    awardsQuad.classList.add("dash-wide");
+    grid.appendChild(awardsQuad);
+  }
+
+  // A dashboard panel with a fixed-height, independently scrolling body
+  function quad(title, headerRight, body) {
+    return el("div", { class: "card dash-panel" }, [
+      el("div", { class: "card__head" }, [el("h3", { text: title }), headerRight || null]),
+      el("div", { class: "dash-scroll" }, body),
+    ]);
+  }
+
+  // Inline designation picker for the "Needs a designation" panel
+  function assignSelect(row, onAssigned) {
+    const sel = el("select", { class: "rec-sel", title: "Assign a designation" }, [
+      el("option", { value: "", text: "Assign\u2026" }),
+      el("option", { value: "Primary", text: "Primary" }),
+      el("option", { value: "Secondary", text: "Secondary" }),
+      el("option", { value: "Non-Driver", text: "Non-Driver" }),
+    ]);
+    sel.addEventListener("click", e => e.stopPropagation());   // don't open the Roster row
+    sel.addEventListener("change", async e => {
+      e.stopPropagation();
+      const val = sel.value; if (!val) return;
+      sel.disabled = true;
+      try {
+        await DS.spUpdate(DS.LISTS.roster, row.record.Id, { DriverStatus: val });
+        await DS.audit("Designation assigned", DS.LISTS.roster, row.employeeId, (row.name || row.employeeId) + ": \u2192 " + val);
+        row.record.DriverStatus = val;               // keep the in-memory roster in sync
+        const tr = sel.closest("tr"); if (tr) tr.remove();
+        onAssigned();
+        DS.toast((row.name || row.employeeId) + " set to " + val + ".", "success");
+      } catch (err) {
+        sel.disabled = false; sel.value = "";
+        DS.toast("Couldn't assign: " + err.message + (err.status === 400 ? " \u2014 the DriverStatus choice list may need that option." : ""), "error");
+      }
+    });
+    return sel;
   }
 
   function statCard(n, label, kind) {
@@ -230,7 +300,7 @@
         listWrap.appendChild(buildTable([
           { head: "Name", render: r => el("span", { class: "strong", text: r.Title || "—" }) },
           { head: "ID", tdClass: "nowrap num", thClass: "num", render: r => el("span", { class: "tnum", text: r.EmployeeId || "—" }) },
-          { head: "Designation", render: r => DS.badge(DS.util.designation(r), "neutral") },
+          { head: "Designation", render: r => DS.util.isUnassigned(r) ? DS.badge("Unassigned", "due") : DS.badge(DS.util.designation(r), "neutral") },
           { head: "Driving", render: r => {
               const d = DS.compute.drivingStatusFor(cache, DS.util.empKey(r.EmployeeId));
               if (d.status === "No-Driving") return DS.badge("No-Driving", "overdue");
@@ -274,10 +344,8 @@
         if (drive.overrideNote) body.appendChild(detailRow("Override note", drive.overrideNote));
       }
 
-      body.appendChild(detailRow("Physical", physicalDetailBadge(phys)));
-      body.appendChild(detailRow("Courses",
-        !crs.applicable ? DS.badge("Not applicable (Non-Driver)", "neutral")
-          : (crs.dueDate && crs.dueDate < today ? DS.badge(crs.status, "overdue") : DS.badge(crs.status, "neutral"))));
+      body.appendChild(detailRow("Physical", physicalDetailBadge(phys, cache.idx.physLeadDays)));
+      body.appendChild(detailRow("Courses", courseDetailBadge(crs, cache.idx.courseLeadDays)));
       body.appendChild(detailRow("Next award",
         awd.eligible ? DS.badge(awd.nextMilestone + "-year (eligible)", "clear")
           : el("span", { class: "tnum", text: awd.nextMilestone + "-year · " + DS.fmtDate(awd.eligibleDate) })));
@@ -286,21 +354,23 @@
       const editWrap = el("div", { class: "detail__edit" });
       editWrap.appendChild(el("span", { class: "label", text: "Driver designation" }));
       const sel = el("select", { class: "field" }, [
+        el("option", { value: "", text: "Unassigned \u2014 choose\u2026" }),
         el("option", { value: "Primary", text: "Primary" }),
         el("option", { value: "Secondary", text: "Secondary" }),
         el("option", { value: "Non-Driver", text: "Non-Driver" }),
       ]);
-      sel.value = DS.util.designation(r);
+      sel.value = DS.util.isUnassigned(r) ? "" : DS.util.designation(r);
       const saveBtn = el("button", { class: "btn btn--sm", text: "Save" });
       saveBtn.addEventListener("click", async () => {
         const val = sel.value;
-        const cur = DS.util.designation(r);
+        const cur = DS.util.isUnassigned(r) ? "" : DS.util.designation(r);
+        if (!val) { DS.toast("Choose a designation to save."); return; }
         if (val === cur) { DS.toast("No change to save."); return; }
         saveBtn.disabled = true; saveBtn.textContent = "Saving…";
         try {
           await DS.spUpdate(DS.LISTS.roster, r.Id, { DriverStatus: val });
           await DS.audit("Designation changed", DS.LISTS.roster, r.EmployeeId,
-            r.Title + ": " + cur + " → " + val);
+            r.Title + ": " + (cur || "Unassigned") + " → " + val);
           r.DriverStatus = val;                 // update in-memory cache
           DS.toast(r.Title + " set to " + val + ".", "success");
           paint(); paintDetail();
@@ -331,17 +401,31 @@
         smallBtn("Driving override", () => openOverrideForm(r)),
       ]));
 
-      const courses = (cache.idx.coursesByEmp[emp] || []).slice().sort(byDateDesc("DateCompleted"));
-      wrap.appendChild(recList("Courses", courses, DS.LISTS.courses, c =>
-        [c.CourseTitle || "—", DS.fmtDate(c.DateCompleted)]));
+      const isMaster = rec => DS.util.isFallbackSource(rec);
+      const renewal = cache.idx.courseRenewalYears;
+      const courseEff = cache.idx.courseInEffect[emp] || {};
+      // Master-sheet course rows hold an estimated completion (due − cycle); show the original due date.
+      const courseSortDate = c => DS.parseDate(c.DateCompleted);
+      const courses = (cache.idx.coursesByEmp[emp] || []).slice().sort((a, b) => (courseSortDate(b) || 0) - (courseSortDate(a) || 0));
+      wrap.appendChild(recList("Courses", courses, DS.LISTS.courses, c => {
+        const d = DS.parseDate(c.DateCompleted);
+        return [c.CourseTitle || "\u2014",
+          isMaster(c) ? (d ? "due " + DS.fmtDate(DS.util.addYears(d, renewal)) : "\u2014") : DS.fmtDate(c.DateCompleted)];
+      }, c => courseEff[String(c.CourseTitle || "").trim()] === c));
 
-      const phys = (cache.idx.physicalsByEmp[emp] || []).slice().sort(byDateDesc("PhysicalDate"));
+      const physEff = cache.idx.physInEffect[emp];
+      const physSortDate = p => DS.parseDate(p.PhysicalDate) || DS.parseDate(p.ExpirationDate);
+      const phys = (cache.idx.physicalsByEmp[emp] || []).slice().sort((a, b) => (physSortDate(b) || 0) - (physSortDate(a) || 0));
       wrap.appendChild(recList("Physicals", phys, DS.LISTS.physicals, p =>
-        ["Tested " + DS.fmtDate(p.PhysicalDate) + (p.Result ? " \u00b7 " + p.Result : ""),
-         p.ExpirationDate ? "exp " + DS.fmtDate(p.ExpirationDate) : ""]));
+        p.PhysicalDate
+          ? ["Tested " + DS.fmtDate(p.PhysicalDate) + (p.Result ? " \u00b7 " + p.Result : ""), p.ExpirationDate ? "exp " + DS.fmtDate(p.ExpirationDate) : ""]
+          : [isMaster(p) ? "Master sheet" : "Physical" + (p.Result ? " \u00b7 " + p.Result : ""), p.ExpirationDate ? "due " + DS.fmtDate(p.ExpirationDate) : ""],
+        p => p === physEff));
 
       const accs = (cache.idx.accidentsByEmp[emp] || []).slice().sort(byDateDesc("AccidentDate"));
       wrap.appendChild(accidentList(accs));
+      wrap.appendChild(el("div", { class: "help", style: "margin-top:6px",
+        text: "\u2713 = the record currently used for status. Master-sheet dates are used only when no uploaded, manual, or exam-history record exists." }));
       return wrap;
     }
 
@@ -351,22 +435,43 @@
       return b;
     }
 
-    // Generic history list. Only "Manual Entry" rows can be removed — imported
-    // records are corrected by adding a newer record (newest always wins).
-    function recList(title, rows, listName, cells) {
+    const SOURCE_TAGS = {
+      "Bulk Upload": ["upload", "Added by an upload on the Imports screen"],
+      "Manual Entry": ["manual", "Entered by hand in the app"],
+      "Legacy History": ["exam log", "From Julie's exam history workbook"],
+      "Master Sheet": ["master", "From Julie's master spreadsheet \u2014 used only if nothing newer is on file"],
+      "Legacy Migration": ["master", "From Julie's master spreadsheet (older migration run) \u2014 used only if nothing newer is on file"],
+    };
+
+    // Full employee history. Shows 6 at first with "Show all". Only "Manual Entry"
+    // rows can be removed; everything else is permanent history.
+    function recList(title, rows, listName, cells, inEffect) {
       const box = el("div", { class: "rec-list" });
       box.appendChild(el("div", { class: "rec-head", text: title + " (" + rows.length + ")" }));
       if (!rows.length) { box.appendChild(el("div", { class: "rec-empty", text: "None on record" })); return box; }
-      rows.slice(0, 6).forEach(rec => {
-        const c = cells(rec);
-        const right = [el("span", { class: "rec-meta", text: c[1] || "" })];
-        if (rec.Source === "Manual Entry") right.push(removeBtn(listName, rec, title));
-        box.appendChild(el("div", { class: "rec-row" }, [
-          el("span", { text: c[0] }),
-          el("span", { class: "rec-right" }, right),
-        ]));
-      });
-      if (rows.length > 6) box.appendChild(el("div", { class: "rec-empty", text: "+ " + (rows.length - 6) + " older" }));
+      const body = el("div");
+      box.appendChild(body);
+      function draw(all) {
+        body.innerHTML = "";
+        (all ? rows : rows.slice(0, 6)).forEach(rec => {
+          const c = cells(rec);
+          const tag = SOURCE_TAGS[rec.Source];
+          const right = [el("span", { class: "rec-meta", text: c[1] || "" })];
+          if (tag) right.push(el("span", { class: "rec-src", title: tag[1], text: tag[0] }));
+          if (rec.Source === "Manual Entry") right.push(removeBtn(listName, rec, title));
+          const eff = inEffect && inEffect(rec);
+          body.appendChild(el("div", { class: "rec-row" + (eff ? " rec-eff" : ""), title: eff ? "Currently used for status" : "" }, [
+            el("span", { text: (eff ? "\u2713 " : "") + c[0] }),
+            el("span", { class: "rec-right" }, right),
+          ]));
+        });
+        if (rows.length > 6) {
+          const t = el("button", { class: "rec-more", type: "button", text: all ? "Show fewer" : "Show all " + rows.length });
+          t.addEventListener("click", () => draw(!all));
+          body.appendChild(t);
+        }
+      }
+      draw(false);
       return box;
     }
 
@@ -443,7 +548,7 @@
       });
     }
     function tag(e, action) { e.__action = action; return e; }
-    const today = () => DS.isoDate(new Date());
+    const today = () => DS.todayIso();
     const dateInput = v => el("input", { class: "field", type: "date", value: v || "" });
 
     function openCourseForm(r) {
@@ -568,7 +673,7 @@
      AUDIT LOG
      ============================================================ */
   async function renderAudit(container) {
-    const rows = await DS.spGet(DS.LISTS.audit, { orderby: "ActionTimestamp desc", top: 500 });
+    const rows = await DS.spGet(DS.LISTS.audit, { orderby: "Id desc", top: 500 });
     container.innerHTML = "";
 
     const types = Array.from(new Set(rows.map(r => r.ActionType).filter(Boolean))).sort();
@@ -609,6 +714,16 @@
     s.id = "roster-records-styles";
     s.textContent =
       ".detail{max-height:calc(100vh - 96px);overflow-y:auto}" +
+      ".dash-quad{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}" +
+      ".dash-wide{grid-column:1/-1}" +
+      ".dash-scroll{height:340px;overflow-y:auto}" +
+      ".dash-wide .dash-scroll{height:auto;max-height:300px}" +
+      ".dash-scroll thead th{position:sticky;top:0;background:var(--paper);z-index:1;padding-top:10px}" +
+      ".dash-scroll .empty-mini{padding-top:60px}" +
+      ".rec-src{font-size:10.5px;color:var(--slate);background:var(--line-2);border-radius:4px;padding:1px 5px}" +
+      ".rec-eff{font-weight:600}" +
+      ".rec-more{border:none;background:none;color:var(--navy-500);font-size:12.5px;cursor:pointer;padding:6px 0}" +
+      "@media (max-width:900px){.dash-quad{grid-template-columns:1fr}}" +
       ".rec-actions{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 14px}" +
       ".rec-list{margin-bottom:12px}" +
       ".rec-head{font-size:11.5px;font-weight:600;color:var(--slate);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}" +

@@ -376,6 +376,7 @@
 
     const resultWrap = el("div", { id: "migrateResult" });
     container.appendChild(resultWrap);
+    container.appendChild(renderDesignationReset());
     container.appendChild(renderMaintenance());
 
     function redraw() { renderBody(resultWrap, container); }
@@ -386,12 +387,67 @@
      For redoing a bad import cleanly (e.g. the first course upload, whose dates
      were affected by the time-zone bug). Removes ONLY records tagged with the
      chosen source, in the chosen list. */
+  /* ---------------- One-time: clear auto-assigned "Primary" ----------------
+     The first roster import stamped everyone "Primary". This clears that
+     automatic value so the master sheet (via this tool) and Julie can assign
+     real designations. It resets ONLY people who are "Primary" with no manual
+     designation change in the Audit Log. Secondary / Non-Driver are never
+     touched. Cleared people are still treated as Primary for compliance and
+     appear under "Needs a designation" until assigned. */
+  function renderDesignationReset() {
+    const MANUAL = ["Designation changed", "Designation assigned"];
+    const checkBtn = el("button", { class: "btn btn--ghost", type: "button", text: "Check roster" });
+    const status = el("div", { class: "help", style: "margin-top:10px" });
+    const actWrap = el("div", { style: "margin-top:10px" });
+    checkBtn.addEventListener("click", async () => {
+      actWrap.innerHTML = ""; status.textContent = "Checking roster and audit log\u2026";
+      try {
+        const [roster, audit] = await Promise.all([
+          DS.spGet(L.roster, { select: ["Id", "EmployeeId", "Title", "DriverStatus"] }),
+          DS.spGet(L.audit, { select: ["ActionType", "TargetId"] }),
+        ]);
+        const manual = new Set(audit.filter(a => MANUAL.includes(String(a.ActionType || ""))).map(a => String(a.TargetId || "").trim()));
+        const primary = roster.filter(r => String(r.DriverStatus || "").trim() === "Primary");
+        const keep = primary.filter(r => manual.has(String(r.EmployeeId || "").trim()));
+        const reset = primary.filter(r => !manual.has(String(r.EmployeeId || "").trim()));
+        status.textContent = primary.length + " employee(s) are \u201CPrimary\u201D: " + keep.length +
+          " were set by hand (kept), " + reset.length + " look automatic and can be cleared. Secondary and Non-Driver are never touched.";
+        if (!reset.length) return;
+        const go = el("button", { class: "btn", type: "button", text: "Clear " + reset.length + " automatic designations" });
+        go.addEventListener("click", async () => {
+          if (!confirm("Clear the automatic \u201CPrimary\u201D designation for " + reset.length + " employees?\n\nThey stay treated as Primary for compliance and appear under \u201CNeeds a designation\u201D until assigned. Running the migration next fills in everyone listed in Julie\u2019s master sheet.")) return;
+          go.disabled = true; checkBtn.disabled = true;
+          const errors = await DS.runBatched(reset, r => DS.spUpdate(L.roster, r.Id, { DriverStatus: null }), (d, t, label) => {
+            status.textContent = label || ("Clearing " + d + " of " + t + "\u2026");
+          });
+          await DS.audit("Automatic designations cleared", L.roster, null, (reset.length - errors.length) + " cleared, " + keep.length + " manual kept");
+          DS.data.clear();
+          status.textContent = (reset.length - errors.length) + " cleared." + (errors.length ? " " + errors.length + " failed \u2014 see below." : " Next: run the migration above.");
+          actWrap.innerHTML = ""; checkBtn.disabled = false;
+          if (errors.length) actWrap.appendChild(DS.errorSummaryEl(errors));
+        });
+        actWrap.appendChild(go);
+      } catch (e) { status.textContent = "Couldn't check: " + e.message; }
+    });
+    return el("div", { class: "card", style: "margin-top:28px" }, [
+      el("div", { class: "card__head" }, el("h3", { text: "One-time \u2014 clear automatic \u201CPrimary\u201D designations" })),
+      el("div", { class: "card__body" }, [
+        el("div", { class: "import-note", text: "The first roster import set everyone to Primary. This clears only those automatic values \u2014 designations someone chose in the app are kept. Do this before running the migration." }),
+        checkBtn, status, actWrap,
+      ]),
+    ]);
+  }
+
   function renderMaintenance() {
     const listSel = el("select", { class: "field", style: "max-width:220px" }, [
       el("option", { value: L.courses, text: "Courses" }),
       el("option", { value: L.physicals, text: "Physicals" }),
+      el("option", { value: L.accidents, text: "Accidents" }),
+      el("option", { value: L.awards, text: "Awards" }),
+      el("option", { value: L.roster, text: "Roster" }),
     ]);
     const srcSel = el("select", { class: "field", style: "max-width:260px" }, [
+      el("option", { value: "__all", text: "ALL records in this list" }),
       el("option", { value: "Bulk Upload", text: "Bulk Upload (Imports screen)" }),
       el("option", { value: "Legacy Migration", text: "Legacy Migration (older migration runs)" }),
       el("option", { value: "Master Sheet", text: "Master Sheet (this tool)" }),
@@ -403,18 +459,25 @@
     countBtn.addEventListener("click", async () => {
       actWrap.innerHTML = ""; status.textContent = "Counting…";
       try {
-        const rows = (await DS.spGet(listSel.value, { select: ["Id", "Source"] })).filter(r => r.Source === srcSel.value);
+        const all = srcSel.value === "__all";
+        const rows = all
+          ? await DS.spGet(listSel.value, { select: ["Id"] })
+          : (await DS.spGet(listSel.value, { select: ["Id", "Source"] })).filter(r => r.Source === srcSel.value);
+        const srcLabel = all ? "(all records)" : "\u201C" + srcSel.value + "\u201D";
         const listLabel = listSel.options[listSel.selectedIndex].text;
-        status.textContent = rows.length + " " + listLabel + " record(s) tagged \u201C" + srcSel.value + "\u201D.";
+        status.textContent = rows.length + " " + listLabel + " record(s) " + (all ? "in total." : "tagged " + srcLabel + ".");
         if (!rows.length) return;
         const del = el("button", { class: "btn", type: "button", text: "Remove these " + rows.length + " records" });
         del.addEventListener("click", async () => {
-          if (!confirm("Permanently remove " + rows.length + " " + listLabel + " records tagged \u201C" + srcSel.value + "\u201D? Other records are not affected.")) return;
+          if (all) {
+            const typed = prompt("This permanently removes ALL " + rows.length + " records in " + listLabel + ".\nThe list and its columns stay. Consider exporting a backup from Reports first.\n\nType DELETE to continue.");
+            if (typed !== "DELETE") { DS.toast("Cancelled \u2014 nothing was removed."); return; }
+          } else if (!confirm("Permanently remove " + rows.length + " " + listLabel + " records tagged " + srcLabel + "? Other records are not affected.")) return;
           del.disabled = true; countBtn.disabled = true;
           const errors = await DS.runBatched(rows, r => DS.spDelete(listSel.value, r.Id), (d, t, label) => {
             status.textContent = label || ("Removing " + d + " of " + t + "\u2026");
           });
-          await DS.audit("Records removed by source", listSel.value, null, (rows.length - errors.length) + " \u201C" + srcSel.value + "\u201D records removed");
+          await DS.audit(all ? "All records removed" : "Records removed by source", listSel.value, null, (rows.length - errors.length) + " " + srcLabel + " records removed");
           DS.data.clear();
           status.textContent = (rows.length - errors.length) + " removed." + (errors.length ? " " + errors.length + " failed \u2014 see below." : "");
           actWrap.innerHTML = ""; countBtn.disabled = false;
@@ -424,9 +487,9 @@
       } catch (e) { status.textContent = "Couldn't count: " + e.message; }
     });
     return el("div", { class: "card", style: "margin-top:28px" }, [
-      el("div", { class: "card__head" }, el("h3", { text: "Maintenance \u2014 remove records from one source" })),
+      el("div", { class: "card__head" }, el("h3", { text: "Maintenance \u2014 remove records" })),
       el("div", { class: "card__body" }, [
-        el("div", { class: "import-note warn", text: "For redoing an import cleanly. Only records with the chosen source tag are removed; everything else stays. Count first, then confirm." }),
+        el("div", { class: "import-note warn", text: "For redoing imports cleanly. Choose a list and either one source tag or all records. The list and its columns always stay. Count first, then confirm." }),
         el("div", { style: "display:flex; gap:10px; flex-wrap:wrap; align-items:center" }, [listSel, srcSel, countBtn]),
         status, actWrap,
       ]),

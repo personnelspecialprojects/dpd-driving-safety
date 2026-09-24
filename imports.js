@@ -127,34 +127,68 @@
     return { records, warnings: [] };
   }
 
+  /* ---- flexible column matching for Roster. The real SQL report headers are
+     Emp#, FirstName, LastName, Rank, WorkingOrg, Workgroup, Supervisor,
+     AdjSvcDate — column ORDER doesn't matter (matched by name, not position),
+     and common spacing/wording variants are accepted too (e.g. "Emp #",
+     "Employee Number", "Working Org", "1st Line Supervisor", "Hire Date"). */
+  function normHeader(s) { return String(s).trim().toLowerCase(); }
+  function findFlexCol(header, pattern) {
+    for (let i = 0; i < header.length; i++) if (pattern.test(normHeader(header[i]))) return i;
+    return -1;
+  }
+  const ROSTER_PATTERNS = {
+    empId: /^emp(loyee)?\s*(#|number|num|no\.?|id)?$/,
+    firstName: /^f(irst)?\s*name$/,
+    lastName: /^l(ast)?\s*name$/,
+    rank: /^rank$/,
+    workingOrg: /^(working\s*)?org(anization)?$/,
+    workgroup: /^(working\s*)?work\s*group$/,
+    supervisor: /^(1st\s*line\s*)?supervisor$/,
+    // AdjSvcDate (Adjusted Service Date) is what the real export provides in
+    // place of a true hire date — used as-is for course grace-period and
+    // award-clock timing. Note this can differ from actual hire date where
+    // service credit (e.g. prior military time) shifts it earlier.
+    hireDate: /^(adj(usted)?\s*(svc|service)\s*date|hire\s*date)$/,
+  };
+
   function parseRoster(wb) {
     const ws = wb.Sheets[wb.SheetNames[0]];
     const r = rowsOf(ws);
-    const loc = locate(r, "Emp #");
-    if (!loc) throw new Error("Couldn't find the 'Emp #' header — is this the Employees-with-Supervisors export?");
-    const ci = colFinder(loc.header);
-    const iEmp = ci("Emp #"), iLast = ci("LastName"), iFirst = ci("FirstName"), iRank = ci("Rank"),
-          iOrg = ci("Working Org"), iWg = ci("Working Workgroup"), iSup = ci("1st Line Supervisor"), iHire = ci("Hire Date");
+    let headerIdx = -1, header = null;
+    for (let i = 0; i < Math.min(r.length, 40); i++) {
+      if (findFlexCol(r[i] || [], ROSTER_PATTERNS.empId) >= 0) { headerIdx = i; header = r[i]; break; }
+    }
+    if (headerIdx < 0) throw new Error("Couldn't find an employee ID column (Emp#, Emp #, Employee Number, ...) — is this the roster export?");
+    const iEmp = findFlexCol(header, ROSTER_PATTERNS.empId);
+    const iFirst = findFlexCol(header, ROSTER_PATTERNS.firstName);
+    const iLast = findFlexCol(header, ROSTER_PATTERNS.lastName);
+    const iRank = findFlexCol(header, ROSTER_PATTERNS.rank);
+    const iOrg = findFlexCol(header, ROSTER_PATTERNS.workingOrg);
+    const iWg = findFlexCol(header, ROSTER_PATTERNS.workgroup);
+    const iSup = findFlexCol(header, ROSTER_PATTERNS.supervisor);
+    const iHire = findFlexCol(header, ROSTER_PATTERNS.hireDate);
     const records = []; let noHire = 0;
-    for (let i = loc.headerIdx + 1; i < r.length; i++) {
+    for (let i = headerIdx + 1; i < r.length; i++) {
       const row = r[i]; if (!row || !row[iEmp]) continue;
-      const first = String(row[iFirst] || "").trim(), last = String(row[iLast] || "").trim();
+      const first = iFirst >= 0 ? String(row[iFirst] || "").trim() : "";
+      const last = iLast >= 0 ? String(row[iLast] || "").trim() : "";
       const hire = iHire >= 0 && row[iHire] ? DS.isoDate(row[iHire]) : null;
       if (!hire) noHire++;
       records.push({
         Title: (first + " " + last).trim(),
         LastName: last,
         EmployeeId: String(row[iEmp]).trim(),
-        Division: String(row[iOrg] || ""),
-        Assignment: String(row[iWg] || ""),
-        Supervisor: String(row[iSup] || ""),
+        Division: iOrg >= 0 ? String(row[iOrg] || "") : "",
+        Assignment: iWg >= 0 ? String(row[iWg] || "") : "",
+        Supervisor: iSup >= 0 ? String(row[iSup] || "") : "",
         HireDate: hire,
-        Rank: String(row[iRank] || ""),
+        Rank: iRank >= 0 ? String(row[iRank] || "") : "",
       });
     }
     const warnings = [];
-    if (iHire < 0) warnings.push("No 'Hire Date' column found — course due-dates for new hires need it.");
-    else if (noHire) warnings.push(noHire + " employee(s) have no hire date.");
+    if (iHire < 0) warnings.push("No hire/service date column found — course due-dates for new hires need it.");
+    else if (noHire) warnings.push(noHire + " employee(s) have no hire/service date.");
     return { records, warnings };
   }
 
@@ -203,10 +237,10 @@
       note: "Deduped by Incident Number — safe to re-upload the same export.",
     },
     roster: {
-      source: '"Employees with Supervisors by Working Org" report',
-      columns: ["Emp #", "LastName", "FirstName", "Rank", "Working Org", "Working Workgroup", "1st Line Supervisor", "Hire Date"],
-      sample: ["123456", "Smith", "Jordan", "Police Officer", "1498", "Patrol", "Garcia, M.", "6/1/2022"],
-      note: "Driver designation (Primary/Secondary/Non-Driver) is never touched by this import.",
+      source: "DPD personnel SQL report export",
+      columns: ["Emp#", "FirstName", "LastName", "Rank", "WorkingOrg", "Workgroup", "Supervisor", "AdjSvcDate"],
+      sample: ["123456", "Jordan", "Smith", "Police Officer", "1498", "Patrol", "Garcia, M.", "6/1/2022"],
+      note: 'Column order doesn\'t matter, and common variants (e.g. "Emp #", "Employee Number") are accepted too. Driver designation is never touched by this import.',
     },
     physicals: {
       source: 'Driver physicals report (sheet "Data")',
@@ -252,15 +286,40 @@
     },
   };
 
-  /* ---- concurrency-limited runner with progress ---- */
+  /* ---- concurrency-limited runner with retry-with-backoff for transient failures.
+     A "transient" failure (429/503/504, or the request never reaching the server
+     at all) is retried with exponential backoff — up to 5 attempts, honoring a
+     Retry-After header when SharePoint sends one. A permanent failure (400, 403,
+     a genuinely malformed record) is NOT retried — retrying it would just fail
+     the same way every time. Large batches also start at lower concurrency,
+     since a big burst of simultaneous requests is what triggers throttling in
+     the first place. ---- */
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   async function runBatched(items, worker, onProgress, concurrency) {
     concurrency = concurrency || 4;
-    let done = 0; const errors = [];
-    const queue = items.slice();
+    if (items.length > 500) concurrency = Math.min(concurrency, 2);   // ease off for big batches
+    const MAX_ATTEMPTS = 5;
+    let done = 0, retried = 0;
+    const errors = [];
+    const queue = items.map(item => ({ item, attempt: 0 }));
+
     async function lane() {
       while (queue.length) {
-        const item = queue.shift();
-        try { await worker(item); } catch (e) { errors.push(e); }
+        const entry = queue.shift();
+        try {
+          await worker(entry.item);
+        } catch (e) {
+          if (e && e.transient && entry.attempt < MAX_ATTEMPTS - 1) {
+            entry.attempt++;
+            retried++;
+            const wait = e.retryAfterMs || Math.min(20000, 400 * Math.pow(2, entry.attempt));
+            onProgress(done, items.length, "Waiting to retry after a busy response (" + retried + " so far)…");
+            await sleep(wait);
+            queue.push(entry);   // back of the line, not counted as done yet
+            continue;
+          }
+          errors.push(e);
+        }
         done++; onProgress(done, items.length);
       }
     }
@@ -455,7 +514,7 @@
     const errors = await runBatched(ops, async op => {
       if (op.kind === "create") await DS.spCreate(listName, op.fields);
       else await DS.spUpdate(listName, op.id, op.fields);
-    }, (done, total) => { barFill.style.width = (total ? done / total * 100 : 100) + "%"; status.textContent = "Processing " + done + " of " + total + "…"; });
+    }, (done, total, label) => { barFill.style.width = (total ? done / total * 100 : 100) + "%"; status.textContent = label || ("Processing " + done + " of " + total + "…"); });
 
     const updated = p.toUpdate.length, created = p.toCreate.length, inactivated = doInactivate ? p.toInactivate.length : 0;
     await DS.audit("Roster import", listName, null,
@@ -485,7 +544,7 @@
 
     function progress(done, total, label) {
       barFill.style.width = (total ? (done / total * 100) : 100) + "%";
-      status.textContent = (label || "Writing") + " " + done + " of " + total + "…";
+      status.textContent = label || ("Writing " + done + " of " + total + "…");
     }
 
     let deleted = 0, deleteErrors = [];
@@ -494,13 +553,13 @@
       if (t.mode === "replace") {
         const existing = await DS.spGet(listName, { select: ["Id"] });
         deleteErrors = await runBatched(existing, item => DS.spDelete(listName, item.Id),
-          (d, tot) => progress(d, tot, "Clearing old records"));
+          (d, tot, label) => progress(d, tot, label || "Clearing old records"));
         deleted = existing.length - deleteErrors.length;
       }
 
       // CREATE
       const createErrors = await runBatched(p.toWrite, rec => DS.spCreate(listName, rec),
-        (d, tot) => progress(d, tot, "Adding records"));
+        (d, tot, label) => progress(d, tot, label || "Adding records"));
       const created = p.toWrite.length - createErrors.length;
 
       await DS.audit("Bulk import — " + t.label, listName, null,

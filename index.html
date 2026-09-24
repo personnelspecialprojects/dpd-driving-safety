@@ -711,11 +711,25 @@ async function spFetch(url, options) {
     "Authorization": "Bearer " + token,
     "Accept": "application/json;odata=nometadata",
   }, (options && options.headers) || {});
-  const res = await fetch(url, Object.assign({}, options, { headers }));
+  let res;
+  try {
+    res = await fetch(url, Object.assign({}, options, { headers }));
+  } catch (networkErr) {
+    // fetch() itself rejected (dropped connection, refused, CORS, etc.) — no HTTP
+    // response at all. Treated as transient: worth a retry with backoff.
+    const err = new Error("Network error reaching SharePoint: " + networkErr.message);
+    err.transient = true;
+    throw err;
+  }
   if (!res.ok) {
     let detail = res.status + " " + res.statusText;
     try { const j = await res.json(); detail = (j.error && (j.error.message || j.error["message"])) || detail; } catch (_) {}
-    throw new Error("SharePoint: " + detail);
+    const err = new Error("SharePoint: " + detail);
+    err.status = res.status;
+    err.transient = (res.status === 429 || res.status === 503 || res.status === 504);
+    const ra = res.headers.get("Retry-After");
+    if (ra) err.retryAfterMs = Number(ra) * 1000;
+    throw err;
   }
   if (res.status === 204) return null;
   return res.json();

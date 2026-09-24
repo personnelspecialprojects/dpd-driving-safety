@@ -252,7 +252,7 @@
   /* ============================================================
      ROSTER  (route can carry a selected employee: #/roster/123456)
      ============================================================ */
-  let rosterState = { search: "", selected: null };
+  let rosterState = { search: "", selected: null, show: "active" };
 
   async function renderRoster(container) {
     const cache = await DS.data.load();
@@ -265,8 +265,16 @@
       class: "field", type: "search",
       placeholder: "Search by name or employee ID", value: rosterState.search,
     });
+    const showSel = el("select", { class: "field", style: "max-width:200px" }, [
+      el("option", { value: "active", text: "Active employees" }),
+      el("option", { value: "separated", text: "Separated employees" }),
+      el("option", { value: "all", text: "Everyone" }),
+    ]);
+    showSel.value = rosterState.show;
+    showSel.addEventListener("change", () => { rosterState.show = showSel.value; paint(); });
     container.appendChild(el("div", { class: "toolbar" }, [
       search,
+      showSel,
       el("span", { class: "count-pill", id: "rosterCount" }),
     ]));
 
@@ -279,7 +287,10 @@
 
     function paint() {
       const q = rosterState.search.trim().toLowerCase();
-      let rows = cache.idx.activeRoster.filter(r => {
+      const base = rosterState.show === "active" ? cache.idx.activeRoster
+        : rosterState.show === "separated" ? cache.roster.filter(r => !DS.util.isActive(r))
+        : cache.roster;
+      let rows = base.filter(r => {
         if (!q) return true;
         return String(r.Title || "").toLowerCase().includes(q)
           || String(r.LastName || "").toLowerCase().includes(q)
@@ -298,7 +309,9 @@
           __onclick: () => { rosterState.selected = DS.util.empKey(r.EmployeeId); paint(); paintDetail(); },
         }));
         listWrap.appendChild(buildTable([
-          { head: "Name", render: r => el("span", { class: "strong", text: r.Title || "—" }) },
+          { head: "Name", render: r => DS.util.isActive(r)
+              ? el("span", { class: "strong", text: r.Title || "—" })
+              : el("span", null, [el("span", { class: "strong", style: "color:var(--muted)", text: r.Title || "—" }), " ", DS.badge("Separated", "neutral")]) },
           { head: "ID", tdClass: "nowrap num", thClass: "num", render: r => el("span", { class: "tnum", text: r.EmployeeId || "—" }) },
           { head: "Designation", render: r => DS.util.isUnassigned(r) ? DS.badge("Unassigned", "due") : DS.badge(DS.util.designation(r), "neutral") },
           { head: "Driving", render: r => {
@@ -330,6 +343,7 @@
       body.appendChild(el("div", { class: "detail__name", text: r.Title || "—" }));
       body.appendChild(el("div", { class: "detail__sub", text: [r.EmployeeId, r.Rank].filter(Boolean).join(" · ") || "—" }));
 
+      body.appendChild(detailRow("Employment", employmentControl(r)));
       body.appendChild(detailRow("Division", r.Division || "—"));
       body.appendChild(detailRow("Assignment", r.Assignment || "—"));
       if (r.Supervisor) body.appendChild(detailRow("Supervisor", r.Supervisor));
@@ -385,6 +399,28 @@
       body.appendChild(recordsSection(r, emp));
 
       detailWrap.appendChild(body);
+    }
+
+    /* ---------- Employment: mark separated / reactivate (history is kept) ---------- */
+    function employmentControl(r) {
+      const active = DS.util.isActive(r);
+      const btn = el("button", { class: "btn btn--ghost btn--sm", type: "button", text: active ? "Mark separated" : "Reactivate" });
+      btn.addEventListener("click", async () => {
+        const msg = active
+          ? "Mark " + (r.Title || r.EmployeeId) + " as separated?\n\nThey'll drop off the Dashboard and out of compliance tracking. All of their records are kept, and they can be reactivated any time."
+          : "Reactivate " + (r.Title || r.EmployeeId) + "?\n\nThey'll return to the Dashboard with their full history and designation.";
+        if (!confirm(msg)) return;
+        btn.disabled = true;
+        try {
+          await DS.spUpdate(DS.LISTS.roster, r.Id, { ActiveEmployee: !active });
+          await DS.audit(active ? "Employee separated" : "Employee reactivated", DS.LISTS.roster, r.EmployeeId, r.Title || "");
+          DS.toast((r.Title || r.EmployeeId) + (active ? " marked separated." : " reactivated."), "success");
+          reload();
+        } catch (e) { btn.disabled = false; DS.toast("Couldn't update: " + e.message, "error"); }
+      });
+      return el("span", { style: "display:inline-flex; gap:8px; align-items:center" }, [
+        active ? DS.badge("Active", "clear") : DS.badge("Separated", "neutral"), btn,
+      ]);
     }
 
     /* ---------- Records: manual add / correct, per employee ---------- */

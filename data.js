@@ -26,6 +26,21 @@
   };
 
   /* ---- driver designation (job-duty; manually maintained) ---- */
+  // Records that come from Julie's master spreadsheet are a fallback only.
+  const FALLBACK_SOURCES = ["Master Sheet", "Legacy Migration"];
+  function isFallbackSource(rec) { return FALLBACK_SOURCES.includes(String((rec && rec.Source) || "").trim()); }
+  // A physical's date for "which is newest": test date, or (if only an
+  // expiration/due date is known) that date minus the standard cycle.
+  function physicalEffectiveDate(p, defaultYears) {
+    const t = DS.parseDate(p.PhysicalDate);
+    if (t) return t;
+    const e = DS.parseDate(p.ExpirationDate);
+    return e ? addYears(e, -defaultYears) : null;
+  }
+
+  // Blank DriverStatus = nobody has assigned a designation yet. For compliance it is
+  // still treated as Primary (the default), but it's surfaced on the Dashboard.
+  function isUnassigned(r) { return !String((r && r.DriverStatus) || "").trim(); }
   function designation(r) {
     const s = String((r && r.DriverStatus) || "Primary").trim();
     return (s === "Secondary" || s === "Non-Driver") ? s : "Primary";  // default Primary
@@ -113,25 +128,51 @@
       if (isActive(r)) idx.activeRoster.push(r);
     });
 
+    /* ---- History model --------------------------------------------------
+       Every record is kept (an employee log); nothing is overwritten.
+       Status comes from the best record:
+         • Real records — uploads, manual entries, actual exam history —
+           compete by date; the newest wins.
+         • Master-sheet records (Julie's spreadsheet; older ones are tagged
+           "Legacy Migration") are a FALLBACK: used only when no real record
+           exists for that course title / that physical.
+         • Pending physicals are history only; they don't set a due date.
+       idx.courseInEffect / idx.physInEffect remember which record counts,
+       so the Records panel can mark it. */
+    const courseReal = {}, courseFallback = {};
+    idx.courseInEffect = {};
     cache.courses.forEach(c => {
       const emp = empKey(c.EmployeeId);
       const title = String(c.CourseTitle || "").trim();
       const d = DS.parseDate(c.DateCompleted);
       if (emp) pushTo(idx.coursesByEmp, emp, c);
       if (!emp || !title || !d) return;
-      const m = (idx.courseLatest[emp] = idx.courseLatest[emp] || {});
-      if (!m[title] || d > m[title]) m[title] = d;
+      const bucket = isFallbackSource(c) ? courseFallback : courseReal;
+      const m = (bucket[emp] = bucket[emp] || {});
+      if (!m[title] || d > m[title].d) m[title] = { d, rec: c };
+    });
+    new Set(Object.keys(courseReal).concat(Object.keys(courseFallback))).forEach(emp => {
+      const real = courseReal[emp] || {}, fb = courseFallback[emp] || {};
+      const titles = new Set(Object.keys(real).concat(Object.keys(fb)));
+      const latest = (idx.courseLatest[emp] = {}), eff = (idx.courseInEffect[emp] = {});
+      titles.forEach(t => { const pick = real[t] || fb[t]; latest[t] = pick.d; eff[t] = pick.rec; });
     });
 
+    const physReal = {}, physFallback = {};
     cache.physicals.forEach(p => {
       const emp = empKey(p.EmployeeId);
-      const d = DS.parseDate(p.PhysicalDate);
       if (!emp) return;
       pushTo(idx.physicalsByEmp, emp, p);
-      const cur = idx.physLatest[emp];
-      const curD = cur ? DS.parseDate(cur.PhysicalDate) : null;
-      if (!cur || (d && (!curD || d > curD))) idx.physLatest[emp] = p;
+      if (String(p.Result || "").trim().toLowerCase() === "pending") return;
+      const d = physicalEffectiveDate(p, idx.physicalDefaultYears);
+      if (!d) return;
+      const bucket = isFallbackSource(p) ? physFallback : physReal;
+      if (!bucket[emp] || d > bucket[emp].d) bucket[emp] = { d, rec: p };
     });
+    new Set(Object.keys(physReal).concat(Object.keys(physFallback))).forEach(emp => {
+      idx.physLatest[emp] = (physReal[emp] || physFallback[emp]).rec;
+    });
+    idx.physInEffect = idx.physLatest;
 
     const ptsCutoff = addMonths(startOfToday(), -idx.pointRolloffMonths);
     idx.ptsCutoff = ptsCutoff;
@@ -215,7 +256,7 @@
         const minTime = Math.min.apply(null, dates.map(d => d.getTime()));
         dueDate = addYears(new Date(minTime), cache.idx.courseRenewalYears);      // renewal cycle
       }
-      return { status, dueDate, applicable };
+      return { status, dueDate, applicable, doneCount: dates.filter(Boolean).length, requiredCount: req.length };
     },
 
     /* Driving eligibility from active points (rolling window). */
@@ -296,6 +337,14 @@
       return out;
     },
 
+    /* Active employees with no designation assigned yet. */
+    needsDesignation(cache) {
+      return cache.idx.activeRoster
+        .filter(isUnassigned)
+        .map(r => ({ employeeId: empKey(r.EmployeeId), name: r.Title, rank: r.Rank || "", record: r }))
+        .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+    },
+
     /* Employees currently on Restrictive or No-Driving status. */
     drivingRestricted(cache) {
       const out = [];
@@ -326,6 +375,6 @@
   };
 
   /* small shared exports for screens */
-  DS.util = { addYears, addMonths, addDays, startOfToday, empKey, isActive, designation, physicalRequired, courseRequired };
+  DS.util = { addYears, addMonths, addDays, startOfToday, empKey, isActive, designation, isUnassigned, physicalRequired, courseRequired, isFallbackSource };
 
 })();

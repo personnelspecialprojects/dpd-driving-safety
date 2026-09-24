@@ -38,15 +38,16 @@
        still at the untouched default ("Primary"). Anything already
        Secondary/Non-Driver — from a prior run or a manual edit — is left
        alone. This makes the tool safe to re-run.
-     - Physicals/Courses records written here are tagged Source="Legacy
-       Migration" and upserted against themselves on repeat runs, so
-       re-running doesn't create duplicates, and a genuinely newer real
-       upload still wins on its own via the app's normal max-date logic.
+     - Dates are ADDED as history, never overwritten. Every exam in the
+       reference workbook becomes its own "Legacy History" record. Master-sheet
+       due dates become separate "Master Sheet" records that only count when no
+       real record (upload, manual entry, exam history) exists — Julie's sheet
+       has stale dates, so real data always takes precedence.
+     - Re-running only adds what's missing; existing records are never edited.
    ============================================================ */
 (function () {
   const el = DS.el;
   const L = DS.LISTS;
-  const SRC = "Legacy Migration";
   const PLAUS_MIN = new Date(2015, 0, 1);
 
   function plausibleDate(v) {
@@ -189,6 +190,7 @@
       const entry = { employeeId: sr.employeeId, name: roster.Title || sr.name, flags: [] };
       entry.currentDesignation = DS.util.designation(roster);
       entry.designationLocked = entry.currentDesignation !== "Primary";
+      entry.rawDesignation = String(roster.DriverStatus || "").trim();
 
       // designation + physical due date
       const pDate = plausibleDate(sr.physicalRaw);
@@ -204,17 +206,8 @@
       }
       entry.suggestedDesignation = suggested;
 
-      // merged exam history (most recent plausible test date wins)
-      const hist = (historyByEmp[sr.employeeId] || []).filter(h => plausibleDate(h.testDate));
-      if (hist.length) {
-        hist.sort((a, b) => new Date(b.testDate) - new Date(a.testDate));
-        const top = hist[0];
-        entry.lastExam = { testDate: DS.isoDate(top.testDate), result: top.result, expirationDate: DS.isoDate(top.expirationDate), source: top.source };
-      }
-      if (pendingByEmp[sr.employeeId]) {
-        const p = pendingByEmp[sr.employeeId][0];
-        entry.pending = { date: DS.isoDate(p.date), note: p.note };
-      }
+      // full exam history — every exam becomes its own record (employee log)
+      entry.exams = examsFor(historyByEmp[sr.employeeId], pendingByEmp[sr.employeeId]);
 
       // defensive driving due date
       const dDate = plausibleDate(sr.ddRaw);
@@ -232,53 +225,99 @@
       plan.push(entry);
     });
 
+    // Employees with exam history who aren't in Safety Team Main: log their
+    // history too (no designation change for them).
+    const inStatus = new Set(statusRows.map(sr => sr.employeeId));
+    Object.keys(historyByEmp).concat(Object.keys(pendingByEmp)).forEach(emp => {
+      if (inStatus.has(emp)) return;
+      inStatus.add(emp);
+      const roster = cache.idx.rosterByEmp[emp];
+      if (!roster) return;
+      plan.push({ employeeId: emp, name: roster.Title || emp, flags: [], historyOnly: true,
+        currentDesignation: DS.util.designation(roster), rawDesignation: String(roster.DriverStatus || "").trim(),
+        designationLocked: true, suggestedDesignation: null, exams: examsFor(historyByEmp[emp], pendingByEmp[emp]) });
+    });
+
     return { plan, unmatchedHistory };
   }
 
-  /* ---------------- commit (idempotent — safe to re-run) ---------------- */
+  function examsFor(hist, pending) {
+    const out = [];
+    (hist || []).forEach(h => {
+      const t = plausibleDate(h.testDate);
+      if (!t) return;
+      const e = plausibleDate(h.expirationDate);
+      out.push({ testDate: DS.isoDate(t), expirationDate: e ? DS.isoDate(e) : null, result: h.result || "" });
+    });
+    (pending || []).forEach(p => {
+      const t = plausibleDate(p.date);
+      if (t) out.push({ testDate: DS.isoDate(t), expirationDate: null, result: "Pending" });
+    });
+    return out;
+  }
+
+  /* ---------------- commit: add history only, never overwrite ----------------
+     Designation: set from Safety Team Main only when still unassigned/default.
+     Physicals: every exam from the reference workbook → its own record
+       ("Legacy History"); a real exam competes by date like any upload.
+     Master sheet due dates → separate "Master Sheet" records that count only
+       when no real record exists (see data.js). Courses get an estimated
+       completion date (due date minus the renewal cycle) for each required title.
+     Every record is checked against what's already on file, so re-running adds
+     only what's missing and never duplicates or edits existing history. */
   async function commitPlan(plan, resolutions, onProgress) {
     const cache = await DS.data.load(true);
     const renewalYears = cache.idx.courseRenewalYears;
     const requiredTitles = cache.idx.requiredTitles;
 
-    const existingPhys = await DS.spGet(L.physicals, { select: ["Id", "EmployeeId", "Source"] });
-    const physByEmp = {}; existingPhys.forEach(p => { if (p.Source === SRC) physByEmp[String(p.EmployeeId).trim()] = p.Id; });
-    const existingCourses = await DS.spGet(L.courses, { select: ["Id", "EmployeeId", "CourseTitle", "Source"] });
-    const courseByKey = {}; existingCourses.forEach(c => { if (c.Source === SRC) courseByKey[String(c.EmployeeId).trim() + "|" + c.CourseTitle] = c.Id; });
+    const physKeys = new Set(), masterPhysKeys = new Set(), courseKeys = new Set();
+    (await DS.spGet(L.physicals, { select: ["EmployeeId", "PhysicalDate", "ExpirationDate", "Source"] })).forEach(p => {
+      const emp = String(p.EmployeeId || "").trim();
+      if (p.PhysicalDate) physKeys.add(emp + "|" + DS.isoDate(p.PhysicalDate));
+      if (DS.util.isFallbackSource(p) && p.ExpirationDate) masterPhysKeys.add(emp + "|" + DS.isoDate(p.ExpirationDate));
+    });
+    (await DS.spGet(L.courses, { select: ["EmployeeId", "CourseTitle", "DateCompleted"] })).forEach(c => {
+      courseKeys.add(String(c.EmployeeId || "").trim() + "|" + String(c.CourseTitle || "").trim() + "|" + DS.isoDate(c.DateCompleted));
+    });
 
     const ops = [];
+    let skipped = 0;
     plan.forEach(entry => {
       if (entry.notOnRoster) return;
-      const roster = cache.idx.rosterByEmp[entry.employeeId];
-      const res = resolutions[entry.employeeId];
+      const emp = entry.employeeId;
+      const roster = cache.idx.rosterByEmp[emp];
+      const name = (roster && roster.Title) || entry.name || "";
+      const res = resolutions[emp];
       const desigToApply = entry.designationLocked ? null : (res && res.designation !== undefined ? res.designation : entry.suggestedDesignation);
-      const finalDesig = desigToApply || entry.currentDesignation;
-
-      if (desigToApply && desigToApply !== entry.currentDesignation)
+      if (desigToApply && desigToApply !== entry.rawDesignation)
         ops.push({ list: L.roster, kind: "update", id: roster.Id, fields: { DriverStatus: desigToApply } });
 
-      if (finalDesig !== "Non-Driver" && (entry.physicalDueDate || entry.lastExam || entry.pending)) {
-        const fields = { EmployeeId: entry.employeeId, Source: SRC };
-        if (entry.lastExam) {
-          fields.PhysicalDate = entry.lastExam.testDate;
-          fields.Result = entry.lastExam.result || "";
-          if (entry.lastExam.expirationDate) fields.ExpirationDate = entry.lastExam.expirationDate;
-        }
-        if (entry.physicalDueDate) fields.ExpirationDate = entry.physicalDueDate; // Safety Team Main wins
-        if (entry.pending) { fields.Result = "Pending"; if (!fields.PhysicalDate) fields.PhysicalDate = entry.pending.date; }
-        if (fields.PhysicalDate || fields.ExpirationDate) {
-          const existingId = physByEmp[entry.employeeId];
-          ops.push(existingId ? { list: L.physicals, kind: "update", id: existingId, fields } : { list: L.physicals, kind: "create", fields });
+      (entry.exams || []).forEach(x => {
+        const k = emp + "|" + x.testDate;
+        if (physKeys.has(k)) { skipped++; return; }
+        physKeys.add(k);
+        const f = { Title: name, EmployeeId: emp, PhysicalDate: x.testDate, Result: x.result, Source: "Legacy History" };
+        if (x.expirationDate) f.ExpirationDate = x.expirationDate;
+        ops.push({ list: L.physicals, kind: "create", fields: f });
+      });
+
+      if (entry.physicalDueDate) {
+        const k = emp + "|" + entry.physicalDueDate;
+        if (masterPhysKeys.has(k)) skipped++;
+        else {
+          masterPhysKeys.add(k);
+          ops.push({ list: L.physicals, kind: "create", fields: { Title: name, EmployeeId: emp, ExpirationDate: entry.physicalDueDate, Source: "Master Sheet" } });
         }
       }
 
-      if (finalDesig !== "Non-Driver" && entry.courseDueDate) {
-        const implied = DS.isoDate(DS.util.addYears(new Date(entry.courseDueDate), -renewalYears));
+      if (entry.courseDueDate) {
+        const est = DS.isoDate(DS.util.addYears(DS.parseDate(entry.courseDueDate), -renewalYears));
         requiredTitles.forEach(title => {
-          const fields = { EmployeeId: entry.employeeId, CourseTitle: title, DateCompleted: implied, CompletionStatus: "Passed", Source: SRC };
-          const key = entry.employeeId + "|" + title;
-          const existingId = courseByKey[key];
-          ops.push(existingId ? { list: L.courses, kind: "update", id: existingId, fields } : { list: L.courses, kind: "create", fields });
+          const k = emp + "|" + title + "|" + est;
+          if (courseKeys.has(k)) { skipped++; return; }
+          courseKeys.add(k);
+          ops.push({ list: L.courses, kind: "create", fields: { Title: name, EmployeeId: emp, CourseTitle: title,
+            DateCompleted: est, CompletionStatus: "Passed", Source: "Master Sheet" } });
         });
       }
     });
@@ -292,9 +331,10 @@
     }, onProgress || (() => {}));
 
     await DS.audit("Legacy migration committed", null, null,
-      rosterN + " designations set, " + physN + " physical records, " + courseN + " course records, " + errors.length + " failed");
+      rosterN + " designations set, " + physN + " physical records, " + courseN + " course records added, " +
+      skipped + " already on file, " + errors.length + " failed");
     DS.data.clear();
-    return { rosterN, physN, courseN, errors };
+    return { rosterN, physN, courseN, skipped, errors };
   }
 
   /* ---- what each upload's real column headers look like, shown on hover ---- */
@@ -336,9 +376,61 @@
 
     const resultWrap = el("div", { id: "migrateResult" });
     container.appendChild(resultWrap);
+    container.appendChild(renderMaintenance());
 
     function redraw() { renderBody(resultWrap, container); }
     redraw();
+  }
+
+  /* ---------------- Maintenance: remove one source's records ----------------
+     For redoing a bad import cleanly (e.g. the first course upload, whose dates
+     were affected by the time-zone bug). Removes ONLY records tagged with the
+     chosen source, in the chosen list. */
+  function renderMaintenance() {
+    const listSel = el("select", { class: "field", style: "max-width:220px" }, [
+      el("option", { value: L.courses, text: "Courses" }),
+      el("option", { value: L.physicals, text: "Physicals" }),
+    ]);
+    const srcSel = el("select", { class: "field", style: "max-width:260px" }, [
+      el("option", { value: "Bulk Upload", text: "Bulk Upload (Imports screen)" }),
+      el("option", { value: "Legacy Migration", text: "Legacy Migration (older migration runs)" }),
+      el("option", { value: "Master Sheet", text: "Master Sheet (this tool)" }),
+      el("option", { value: "Legacy History", text: "Legacy History (this tool)" }),
+    ]);
+    const countBtn = el("button", { class: "btn btn--ghost", type: "button", text: "Count records" });
+    const status = el("div", { class: "help", style: "margin-top:10px" });
+    const actWrap = el("div", { style: "margin-top:10px" });
+    countBtn.addEventListener("click", async () => {
+      actWrap.innerHTML = ""; status.textContent = "Counting…";
+      try {
+        const rows = (await DS.spGet(listSel.value, { select: ["Id", "Source"] })).filter(r => r.Source === srcSel.value);
+        const listLabel = listSel.options[listSel.selectedIndex].text;
+        status.textContent = rows.length + " " + listLabel + " record(s) tagged \u201C" + srcSel.value + "\u201D.";
+        if (!rows.length) return;
+        const del = el("button", { class: "btn", type: "button", text: "Remove these " + rows.length + " records" });
+        del.addEventListener("click", async () => {
+          if (!confirm("Permanently remove " + rows.length + " " + listLabel + " records tagged \u201C" + srcSel.value + "\u201D? Other records are not affected.")) return;
+          del.disabled = true; countBtn.disabled = true;
+          const errors = await DS.runBatched(rows, r => DS.spDelete(listSel.value, r.Id), (d, t, label) => {
+            status.textContent = label || ("Removing " + d + " of " + t + "\u2026");
+          });
+          await DS.audit("Records removed by source", listSel.value, null, (rows.length - errors.length) + " \u201C" + srcSel.value + "\u201D records removed");
+          DS.data.clear();
+          status.textContent = (rows.length - errors.length) + " removed." + (errors.length ? " " + errors.length + " failed \u2014 see below." : "");
+          actWrap.innerHTML = ""; countBtn.disabled = false;
+          if (errors.length) actWrap.appendChild(DS.errorSummaryEl(errors));
+        });
+        actWrap.appendChild(del);
+      } catch (e) { status.textContent = "Couldn't count: " + e.message; }
+    });
+    return el("div", { class: "card", style: "margin-top:28px" }, [
+      el("div", { class: "card__head" }, el("h3", { text: "Maintenance \u2014 remove records from one source" })),
+      el("div", { class: "card__body" }, [
+        el("div", { class: "import-note warn", text: "For redoing an import cleanly. Only records with the chosen source tag are removed; everything else stays. Count first, then confirm." }),
+        el("div", { style: "display:flex; gap:10px; flex-wrap:wrap; align-items:center" }, [listSel, srcSel, countBtn]),
+        status, actWrap,
+      ]),
+    ]);
   }
 
   function buildDrop(title, sub, onFile, formatSpec) {
@@ -377,7 +469,8 @@
     state.plan = plan; state.unmatchedHistory = unmatchedHistory;
     wrap.innerHTML = "";
 
-    const onRoster = plan.filter(p => !p.notOnRoster);
+    const onRoster = plan.filter(p => !p.notOnRoster && !p.historyOnly);
+    const historyOnly = plan.filter(p => p.historyOnly);
     const notOnRoster = plan.filter(p => p.notOnRoster);
     const locked = onRoster.filter(p => p.designationLocked);
     const flagged = onRoster.filter(p => !p.designationLocked && p.flags.length);
@@ -395,7 +488,8 @@
     if (state.history) {
       wrap.appendChild(el("div", { class: "import-note", text:
         "History workbook sheets found: " + (state.foundSheets.join(", ") || "none recognized") +
-        ". " + unmatchedHistory + " history row(s) couldn't be matched to an employee (New Hires rows are matched by name, not ID)." }));
+        ". " + unmatchedHistory + " history row(s) couldn't be matched to an employee (New Hires rows are matched by name, not ID)." +
+        (historyOnly.length ? " " + historyOnly.length + " more employee(s) aren't in Safety Team Main but have exam history — their history will be logged too." : "") }));
     } else {
       wrap.appendChild(el("div", { class: "import-note warn", text:
         "No history workbook loaded — physical exam history and Pending results won't be included. Designations and due dates from Safety Team Main will still be applied." }));
@@ -458,7 +552,8 @@
         });
         wrap.innerHTML = "";
         const body = el("div", { class: "card__body" }, el("div", { class: "import-note" + (result.errors.length ? " warn" : ""), text:
-          "Planned: " + result.rosterN + " designation(s), " + result.physN + " physical record(s), " + result.courseN + " course record(s). " +
+          "Planned: " + result.rosterN + " designation(s), " + result.physN + " physical record(s), " + result.courseN + " course record(s) added to history; " +
+          result.skipped + " already on file (skipped). " +
           (result.errors.length
             ? result.errors.length + " operation(s) failed — grouped below. Re-running is safe; it only fills in what's missing."
             : "All written. Safe to re-run later as more files come in — already-set designations won't be touched.") }));

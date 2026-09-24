@@ -236,7 +236,7 @@
   }
 
   /* ---------------- commit (idempotent — safe to re-run) ---------------- */
-  async function commitPlan(plan, resolutions) {
+  async function commitPlan(plan, resolutions, onProgress) {
     const cache = await DS.data.load(true);
     const renewalYears = cache.idx.courseRenewalYears;
     const requiredTitles = cache.idx.requiredTitles;
@@ -289,7 +289,7 @@
     const errors = await DS.runBatched(ops, async op => {
       if (op.kind === "update") await DS.spUpdate(op.list, op.id, op.fields);
       else await DS.spCreate(op.list, op.fields);
-    }, () => {});
+    }, onProgress || (() => {}));
 
     await DS.audit("Legacy migration committed", null, null,
       rosterN + " designations set, " + physN + " physical records, " + courseN + " course records, " + errors.length + " failed");
@@ -417,14 +417,33 @@
     const commitBtn = el("button", { class: "btn", text: "Apply to SharePoint (" + (clean.length + Object.keys(state.resolutions).length) + " employees)" });
     commitBtn.addEventListener("click", async () => {
       commitBtn.disabled = true; commitBtn.textContent = "Applying…";
+      // live progress — this run can be several thousand writes and take a while
+      const bar = el("div", { class: "progress" }, el("div", { class: "progress__bar" }));
+      const barFill = bar.firstChild;
+      const status = el("div", { style: "font-size:13px; color:var(--slate)", text: "Preparing…" });
+      const progCard = el("div", { class: "card", style: "margin-top:14px" }, el("div", { class: "card__body" }, [
+        el("h3", { text: "Applying migration…", style: "font-size:15px; margin-bottom:6px" }),
+        el("div", { class: "help", text: "Large runs can take a while. Keep this tab open and in front until it finishes." }),
+        bar, status,
+      ]));
+      wrap.appendChild(progCard);
+      progCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
       try {
-        const result = await commitPlan(plan, state.resolutions);
+        const result = await commitPlan(plan, state.resolutions, (done, total, label) => {
+          barFill.style.width = (total ? done / total * 100 : 100) + "%";
+          status.textContent = label || ("Writing " + done + " of " + total + "…");
+        });
         wrap.innerHTML = "";
-        wrap.appendChild(el("div", { class: "card" }, el("div", { class: "card__body" }, el("div", { class: "import-note", text:
-          result.rosterN + " designation(s) set, " + result.physN + " physical record(s), " + result.courseN + " course record(s) written." +
-          (result.errors.length ? " " + result.errors.length + " operation(s) failed — check the console." : " Safe to re-run later as more files come in — already-set designations won't be touched.") }))));
+        const body = el("div", { class: "card__body" }, el("div", { class: "import-note" + (result.errors.length ? " warn" : ""), text:
+          "Planned: " + result.rosterN + " designation(s), " + result.physN + " physical record(s), " + result.courseN + " course record(s). " +
+          (result.errors.length
+            ? result.errors.length + " operation(s) failed — grouped below. Re-running is safe; it only fills in what's missing."
+            : "All written. Safe to re-run later as more files come in — already-set designations won't be touched.") }));
+        if (result.errors.length) body.appendChild(DS.errorSummaryEl(result.errors));
+        wrap.appendChild(el("div", { class: "card" }, body));
         DS.toast("Migration applied.", result.errors.length ? "error" : "success");
       } catch (e) {
+        progCard.remove();
         commitBtn.disabled = false; commitBtn.textContent = "Apply to SharePoint";
         DS.toast("Migration failed: " + e.message, "error");
       }

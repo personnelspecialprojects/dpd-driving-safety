@@ -418,6 +418,8 @@
 
   /* ---- register ---- */
   DS.registerScreen("admin",   { title: "Admin",     icon: "◈", render: renderAdmin });
+  DS.modal = modal;       // shared with the Roster "Records" editor
+  DS.formField = field;
   DS.registerScreen("tickets", { title: "Tickets",   icon: "▣", render: renderTickets });
   DS.registerScreen("reports", { title: "Reports",   icon: "▦", render: renderReports });
 

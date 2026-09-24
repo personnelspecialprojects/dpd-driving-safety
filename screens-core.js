@@ -33,6 +33,105 @@
 
   function emptyMini(msg) { return el("div", { class: "empty-mini", text: msg }); }
 
+  /* ---- smartTable: sortable columns + search + filter dropdowns ----
+     o.key       remembers sort/filter per table between visits
+     o.columns   [{ head, render(r), sort(r)?, thClass?, tdClass?, dir? }]
+                 (columns with a sort() get a clickable header)
+     o.facets    [{ label, options: [[value,text]] or fn(rows), test(r, value) }]
+     o.search    r → text matched by the search box
+     o.onRow / o.rowClass  optional row click + extra class
+     o.countEl / o.noun    element showing "12 of 85 employees"
+     Returns { bar, body, refresh(), setRows(rows) }. */
+  const TABLE_STATE = {};
+  function smartTable(o) {
+    // o.defaultSort = [columnIndex, 1 | -1]; otherwise rows keep their given (priority) order
+    const dflt = o.defaultSort || [null, 1];
+    const st = TABLE_STATE[o.key] = TABLE_STATE[o.key] || { q: "", sort: dflt[0], dir: dflt[1], facets: {} };
+    let rows = o.rows || [];
+    const bar = el("div", { class: "st-bar" });
+    const body = el("div", { class: "st-body" });
+    const empty = v => v == null || v === "" || (v instanceof Date && isNaN(v));
+
+    function buildBar() {
+      bar.innerHTML = "";
+      const q = el("input", { class: "st-search", type: "search", placeholder: o.placeholder || "Search name or ID", value: st.q });
+      q.addEventListener("input", () => { st.q = q.value; draw(); });
+      bar.appendChild(q);
+      (o.facets || []).forEach(f => {
+        const opts = typeof f.options === "function" ? f.options(rows) : f.options;
+        const sel = el("select", { class: "st-facet", title: f.label },
+          [el("option", { value: "", text: f.label + ": All" })].concat(opts.map(([v, t]) => el("option", { value: v, text: t }))));
+        sel.value = st.facets[f.label] || "";
+        if (sel.value !== (st.facets[f.label] || "")) st.facets[f.label] = "";   // saved choice no longer offered
+        sel.addEventListener("change", () => { st.facets[f.label] = sel.value; draw(); });
+        bar.appendChild(sel);
+      });
+      const clear = el("button", { class: "st-clear", type: "button", text: "Clear" });
+      clear.addEventListener("click", () => { st.q = ""; st.facets = {}; st.sort = dflt[0]; st.dir = dflt[1]; buildBar(); draw(); });
+      bar.appendChild(clear);
+    }
+
+    function visible() {
+      const needle = st.q.trim().toLowerCase();
+      let out = rows.filter(r =>
+        (!needle || String(o.search ? o.search(r) : "").toLowerCase().includes(needle)) &&
+        (o.facets || []).every(f => { const v = st.facets[f.label]; return !v || f.test(r, v); }));
+      const col = st.sort != null ? o.columns[st.sort] : null;
+      if (col && col.sort) {
+        out = out.slice().sort((a, b) => {
+          let va = col.sort(a), vb = col.sort(b);
+          const ea = empty(va), eb = empty(vb);
+          if (ea || eb) return ea === eb ? 0 : (ea ? 1 : -1);          // blanks always last
+          if (va instanceof Date) va = va.getTime();
+          if (vb instanceof Date) vb = vb.getTime();
+          const c = (typeof va === "number" && typeof vb === "number") ? va - vb
+            : String(va).localeCompare(String(vb), undefined, { numeric: true, sensitivity: "base" });
+          return c * st.dir;
+        });
+      }
+      return out;
+    }
+
+    function draw() {
+      const vis = visible();
+      if (o.countEl) {
+        const n = rows.length, noun = o.noun || "employee";
+        o.countEl.textContent = (vis.length === n ? "" : vis.length + " of ") + n + " " + noun + (n === 1 ? "" : "s");
+      }
+      body.innerHTML = "";
+      if (!rows.length) { body.appendChild(emptyMini(o.emptyText || "Nothing to show.")); return; }
+      if (!vis.length) { body.appendChild(emptyMini("No matches \u2014 adjust or clear the filters.")); return; }
+      const shown = o.limit ? vis.slice(0, o.limit) : vis;
+      const thead = el("thead", null, el("tr", null, o.columns.map((c, i) => {
+        const arrow = st.sort === i ? (st.dir > 0 ? " \u25B2" : " \u25BC") : "";
+        const th = el("th", { class: (c.thClass || "") + (c.sort ? " st-sortable" : ""), title: c.sort ? "Click to sort" : "" }, c.head + arrow);
+        if (c.sort) th.addEventListener("click", () => {
+          if (st.sort === i) st.dir = -st.dir; else { st.sort = i; st.dir = c.dir || 1; }
+          draw();
+        });
+        return th;
+      })));
+      const tbody = el("tbody", null, shown.map(r => {
+        const tr = el("tr", null, o.columns.map(c => {
+          const cell = c.render(r);
+          return el("td", { class: c.tdClass || "" }, typeof cell === "string" ? cell : [cell]);
+        }));
+        if (o.onRow) {
+          tr.className = "roster-row" + (o.rowClass ? " " + o.rowClass(r) : "");
+          tr.addEventListener("click", () => o.onRow(r));
+        }
+        return tr;
+      }));
+      body.appendChild(el("table", { class: "tbl" }, [thead, tbody]));
+      if (o.limit && vis.length > o.limit) body.appendChild(emptyMini("Showing the first " + o.limit + " \u2014 search or filter to narrow the list."));
+    }
+
+    buildBar(); draw();
+    return { bar, body, refresh: draw, setRows(r) { rows = r; buildBar(); draw(); } };
+  }
+  const distinctOptions = fn => rows => Array.from(new Set(rows.map(fn).filter(v => v != null && String(v).trim() !== "")))
+    .sort((a, b) => String(a).localeCompare(String(b), undefined, { numeric: true })).map(v => [String(v), String(v)]);
+
   function dueBadge(dueDate, overdue) {
     return DS.badge(DS.fmtDate(dueDate), overdue ? "overdue" : "due");
   }
@@ -91,7 +190,7 @@
     const courses = DS.compute.coursesDue(cache);
     const awards = DS.compute.awardsEligible(cache);
     const restricted = DS.compute.drivingRestricted(cache);
-    const unassigned = DS.compute.needsDesignation(cache);
+    let unassigned = DS.compute.needsDesignation(cache);
 
     container.innerHTML = "";
 
@@ -107,63 +206,101 @@
       statCard(awards.length, "Awards eligible now", "clear"),
     ]));
 
-    // 2x2 quadrants, each scrolling on its own; awards full-width underneath
     const grid = el("div", { class: "dash-quad" });
     container.appendChild(grid);
-    const pill = n => el("span", { class: "count-pill", text: n + (n === 1 ? " employee" : " employees") });
+
+    // shared helpers for these panels
+    const nameSort = r => { const rr = cache.idx.rosterByEmp[r.employeeId]; return ((rr && rr.LastName) || "") + " " + (r.name || ""); };
+    const nameCol = { head: "Employee", render: r => el("span", { class: "strong", text: r.name || "\u2014" }), sort: nameSort };
+    const searchText = r => (r.name || "") + " " + r.employeeId;
+    const toRoster = r => DS.navigate("roster/" + encodeURIComponent(r.employeeId));
+    function panel(key, title, rows, cfg) {
+      const pill = el("span", { class: "count-pill" });
+      const t = smartTable(Object.assign({ key: "dash-" + key, rows, countEl: pill, search: searchText, onRow: toRoster }, cfg));
+      grid.appendChild(quad(title, pill, t.body, t.bar));
+      return t;
+    }
 
     // Q1 — Physicals due
-    grid.appendChild(quad("Physicals due", pill(physicals.length),
-      physicals.length ? buildTable([
-        { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
-        { head: "Driver", render: r => driverCell(r.required) },
-        { head: "Status", thClass: "nowrap", tdClass: "nowrap", render: r => physBadge(r) },
-      ], rowsWithNav(physicals)) : emptyMini("No physicals due or missing within the alert window.")));
+    const PH_RANK = { missing: 0, overdue: 1, due: 2 };
+    panel("phys", "Physicals due", physicals, {
+      emptyText: "No physicals due or missing within the alert window.",
+      columns: [
+        nameCol,
+        { head: "Driver", render: r => driverCell(r.required), sort: r => (r.required ? 0 : 1) },
+        { head: "Status", thClass: "nowrap", tdClass: "nowrap", render: r => physBadge(r),
+          sort: r => PH_RANK[r.urgency] * 1e13 + (r.dueDate ? r.dueDate.getTime() : 0) },
+      ],
+      facets: [
+        { label: "Driver", options: [["Primary", "Primary"], ["Secondary", "Secondary"]], test: (r, v) => (r.required ? "Primary" : "Secondary") === v },
+        { label: "Status", options: [["missing", "Missing"], ["overdue", "Overdue"], ["due", "Due soon"]], test: (r, v) => r.urgency === v },
+      ],
+    });
 
     // Q2 — Courses due
-    grid.appendChild(quad("Defensive driving due", pill(courses.length),
-      courses.length ? buildTable([
-        { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
-        { head: "Status", render: r => DS.badge(r.status, r.status === "Not started" ? "overdue" : "neutral") },
-        { head: "Due", thClass: "nowrap", tdClass: "nowrap", render: r => dueBadge(r.dueDate, r.overdue) },
-      ], rowsWithNav(courses)) : emptyMini("No courses due within the alert window.")));
+    panel("courses", "Defensive driving due", courses, {
+      emptyText: "No courses due within the alert window.",
+      columns: [
+        nameCol,
+        { head: "Status", render: r => DS.badge(r.status, r.status === "Not started" ? "overdue" : "neutral"), sort: r => r.status },
+        { head: "Due", thClass: "nowrap", tdClass: "nowrap", render: r => dueBadge(r.dueDate, r.overdue), sort: r => r.dueDate },
+      ],
+      facets: [
+        { label: "Status", options: [["Not started", "Not started"], ["Incomplete", "Incomplete"], ["Renewal due", "Renewal due"]], test: (r, v) => r.status === v },
+        { label: "Timing", options: [["overdue", "Overdue"], ["upcoming", "Coming due"]], test: (r, v) => (r.overdue ? "overdue" : "upcoming") === v },
+      ],
+    });
 
     // Q3 — Needs a designation (assign right here)
-    const needPill = pill(unassigned.length);
-    let remaining = unassigned.length;
-    function assignedOne() {
-      remaining--;
-      needPill.textContent = remaining + (remaining === 1 ? " employee" : " employees");
-      needStat.firstChild.textContent = String(remaining);
-      needStat.className = "stat stat--" + (remaining ? "due" : "clear");
+    let needTable = null;
+    function assignedOne(row) {
+      unassigned = unassigned.filter(x => x !== row);
+      needTable.setRows(unassigned);
+      needStat.firstChild.textContent = String(unassigned.length);
+      needStat.className = "stat stat--" + (unassigned.length ? "due" : "clear");
     }
-    grid.appendChild(quad("Needs a designation", needPill,
-      unassigned.length ? buildTable([
-        { head: "Employee", render: r => el("span", { class: "strong", text: r.name || "\u2014" }) },
-        { head: "ID", tdClass: "nowrap", render: r => el("span", { class: "tnum", text: r.employeeId }) },
+    needTable = panel("need", "Needs a designation", unassigned, {
+      emptyText: "Everyone on the active roster has a designation.",
+      columns: [
+        nameCol,
+        { head: "ID", tdClass: "nowrap", render: r => el("span", { class: "tnum", text: r.employeeId }), sort: r => r.employeeId },
+        { head: "Rank", render: r => r.rank || "\u2014", sort: r => r.rank },
         { head: "Assign", tdClass: "nowrap", render: r => assignSelect(r, assignedOne) },
-      ], rowsWithNav(unassigned)) : emptyMini("Everyone on the active roster has a designation.")));
+      ],
+      facets: [{ label: "Rank", options: distinctOptions(r => r.rank), test: (r, v) => r.rank === v }],
+    });
 
     // Q4 — Driving status
-    grid.appendChild(quad("Driving status", pill(restricted.length),
-      restricted.length ? buildTable([
-        { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
-        { head: "Status", render: r => DS.badge(r.status, r.status === "No-Driving" ? "overdue" : "due") },
-        { head: "Active points", thClass: "num", tdClass: "num", render: r => el("span", { class: "tnum", text: String(r.points) }) },
-      ], rowsWithNav(restricted)) : emptyMini("No employees are on restricted or no-driving status.")));
+    const isOverride = r => !!DS.compute.drivingStatusFor(cache, r.employeeId).override;
+    panel("driving", "Driving status", restricted, {
+      emptyText: "No employees are on restricted or no-driving status.",
+      columns: [
+        nameCol,
+        { head: "Status", render: r => DS.badge(r.status + (isOverride(r) ? " \u00b7 manual" : ""), r.status === "No-Driving" ? "overdue" : "due"),
+          sort: r => (r.status === "No-Driving" ? 0 : 1) },
+        { head: "Active points", thClass: "num", tdClass: "num", render: r => el("span", { class: "tnum", text: String(r.points) }), sort: r => r.points, dir: -1 },
+      ],
+      facets: [
+        { label: "Status", options: [["No-Driving", "No-Driving"], ["Restrictive", "Restrictive"]], test: (r, v) => r.status === v },
+        { label: "Source", options: [["points", "Accident points"], ["manual", "Manual override"]], test: (r, v) => (isOverride(r) ? "manual" : "points") === v },
+      ],
+    });
 
-    // Awards — full width below the quadrants
-    const awardsQuad = quad("Awards eligible", pill(awards.length),
-      awards.length ? buildTable(awardColumns(cache, container), rowsWithNav(awards, false))
-        : emptyMini("No employees are award-eligible right now."));
+    // Awards — full width below the quadrants (rows not clickable: they hold a button)
+    const awardsPill = el("span", { class: "count-pill" });
+    const at = smartTable({ key: "dash-awards", rows: awards, countEl: awardsPill, search: searchText,
+      emptyText: "No employees are award-eligible right now.", columns: awardColumns(cache, container, nameSort),
+      facets: [{ label: "Milestone", options: distinctOptions(r => r.nextMilestone + "-year"), test: (r, v) => (r.nextMilestone + "-year") === v }] });
+    const awardsQuad = quad("Awards eligible", awardsPill, at.body, at.bar);
     awardsQuad.classList.add("dash-wide");
     grid.appendChild(awardsQuad);
   }
 
-  // A dashboard panel with a fixed-height, independently scrolling body
-  function quad(title, headerRight, body) {
+  // A dashboard panel: header, filter bar, then a fixed-height scrolling body
+  function quad(title, headerRight, body, bar) {
     return el("div", { class: "card dash-panel" }, [
       el("div", { class: "card__head" }, [el("h3", { text: title }), headerRight || null]),
+      bar || null,
       el("div", { class: "dash-scroll" }, body),
     ]);
   }
@@ -185,8 +322,7 @@
         await DS.spUpdate(DS.LISTS.roster, row.record.Id, { DriverStatus: val });
         await DS.audit("Designation assigned", DS.LISTS.roster, row.employeeId, (row.name || row.employeeId) + ": \u2192 " + val);
         row.record.DriverStatus = val;               // keep the in-memory roster in sync
-        const tr = sel.closest("tr"); if (tr) tr.remove();
-        onAssigned();
+        onAssigned(row);
         DS.toast((row.name || row.employeeId) + " set to " + val + ".", "success");
       } catch (err) {
         sel.disabled = false; sel.value = "";
@@ -212,11 +348,11 @@
     }));
   }
 
-  function awardColumns(cache, container) {
+  function awardColumns(cache, container, nameSort) {
     const cols = [
-      { head: "Employee", render: r => el("span", { class: "strong", text: r.name }) },
-      { head: "Milestone", render: r => DS.badge(r.nextMilestone + "-year", "clear") },
-      { head: "Eligible since", thClass: "nowrap", tdClass: "nowrap", render: r => el("span", { class: "tnum", text: DS.fmtDate(r.eligibleDate) }) },
+      { head: "Employee", render: r => el("span", { class: "strong", text: r.name }), sort: nameSort },
+      { head: "Milestone", render: r => DS.badge(r.nextMilestone + "-year", "clear"), sort: r => r.nextMilestone },
+      { head: "Eligible since", thClass: "nowrap", tdClass: "nowrap", render: r => el("span", { class: "tnum", text: DS.fmtDate(r.eligibleDate) }), sort: r => r.eligibleDate },
     ];
     if (cache.idx.allowMark) {
       cols.push({
@@ -261,22 +397,14 @@
 
     container.innerHTML = "";
 
-    const search = el("input", {
-      class: "field", type: "search",
-      placeholder: "Search by name or employee ID", value: rosterState.search,
-    });
     const showSel = el("select", { class: "field", style: "max-width:200px" }, [
       el("option", { value: "active", text: "Active employees" }),
       el("option", { value: "separated", text: "Separated employees" }),
       el("option", { value: "all", text: "Everyone" }),
     ]);
     showSel.value = rosterState.show;
-    showSel.addEventListener("change", () => { rosterState.show = showSel.value; paint(); });
-    container.appendChild(el("div", { class: "toolbar" }, [
-      search,
-      showSel,
-      el("span", { class: "count-pill", id: "rosterCount" }),
-    ]));
+    const countPill = el("span", { class: "count-pill" });
+    container.appendChild(el("div", { class: "toolbar" }, [showSel, countPill]));
 
     const split = el("div", { class: "split" });
     const listWrap = el("div", { class: "card" });
@@ -285,45 +413,48 @@
     split.appendChild(detailWrap);
     container.appendChild(split);
 
-    function paint() {
-      const q = rosterState.search.trim().toLowerCase();
-      const base = rosterState.show === "active" ? cache.idx.activeRoster
-        : rosterState.show === "separated" ? cache.roster.filter(r => !DS.util.isActive(r))
-        : cache.roster;
-      let rows = base.filter(r => {
-        if (!q) return true;
-        return String(r.Title || "").toLowerCase().includes(q)
-          || String(r.LastName || "").toLowerCase().includes(q)
-          || String(r.EmployeeId || "").toLowerCase().includes(q);
-      });
-      rows.sort((a, b) => String(a.LastName || a.Title).localeCompare(String(b.LastName || b.Title)));
+    const baseRows = () => rosterState.show === "active" ? cache.idx.activeRoster
+      : rosterState.show === "separated" ? cache.roster.filter(r => !DS.util.isActive(r))
+      : cache.roster;
+    const desigLabel = r => DS.util.isUnassigned(r) ? "Unassigned" : DS.util.designation(r);
+    const driving = r => DS.compute.drivingStatusFor(cache, DS.util.empKey(r.EmployeeId)).status;
+    const DRIVE_RANK = { "No-Driving": 0, "Restrictive": 1, "Normal": 2 };
 
-      document.getElementById("rosterCount").textContent =
-        rows.length + (rows.length === 1 ? " employee" : " employees");
-
-      listWrap.innerHTML = "";
-      if (!rows.length) { listWrap.appendChild(emptyMini("No matching employees.")); }
-      else {
-        const tableRows = rows.slice(0, 400).map(r => Object.assign({}, r, {
-          __rowClass: "roster-row" + (DS.util.empKey(r.EmployeeId) === rosterState.selected ? " selected" : ""),
-          __onclick: () => { rosterState.selected = DS.util.empKey(r.EmployeeId); paint(); paintDetail(); },
-        }));
-        listWrap.appendChild(buildTable([
-          { head: "Name", render: r => DS.util.isActive(r)
-              ? el("span", { class: "strong", text: r.Title || "—" })
-              : el("span", null, [el("span", { class: "strong", style: "color:var(--muted)", text: r.Title || "—" }), " ", DS.badge("Separated", "neutral")]) },
-          { head: "ID", tdClass: "nowrap num", thClass: "num", render: r => el("span", { class: "tnum", text: r.EmployeeId || "—" }) },
-          { head: "Designation", render: r => DS.util.isUnassigned(r) ? DS.badge("Unassigned", "due") : DS.badge(DS.util.designation(r), "neutral") },
-          { head: "Driving", render: r => {
-              const d = DS.compute.drivingStatusFor(cache, DS.util.empKey(r.EmployeeId));
-              if (d.status === "No-Driving") return DS.badge("No-Driving", "overdue");
-              if (d.status === "Restrictive") return DS.badge("Restrictive", "due");
-              return el("span", { style: "color:var(--muted)", text: "—" });
-            } },
-        ], tableRows));
-        if (rows.length > 400) listWrap.appendChild(emptyMini("Showing first 400 — narrow the search to see the rest."));
-      }
-    }
+    const table = smartTable({
+      key: "roster", rows: baseRows(), countEl: countPill, limit: 400, defaultSort: [0, 1],   // last name A→Z
+      placeholder: "Search by name or employee ID",
+      search: r => [r.Title, r.LastName, r.EmployeeId].join(" "),
+      onRow: r => { rosterState.selected = DS.util.empKey(r.EmployeeId); table.refresh(); paintDetail(); },
+      rowClass: r => DS.util.empKey(r.EmployeeId) === rosterState.selected ? "selected" : "",
+      emptyText: "No employees in this view.",
+      columns: [
+        { head: "Name", sort: r => (r.LastName || "") + " " + (r.Title || ""),
+          render: r => DS.util.isActive(r)
+            ? el("span", { class: "strong", text: r.Title || "—" })
+            : el("span", null, [el("span", { class: "strong", style: "color:var(--muted)", text: r.Title || "—" }), " ", DS.badge("Separated", "neutral")]) },
+        { head: "ID", tdClass: "nowrap num", thClass: "num", sort: r => String(r.EmployeeId || ""),
+          render: r => el("span", { class: "tnum", text: r.EmployeeId || "—" }) },
+        { head: "Designation", sort: desigLabel,
+          render: r => DS.util.isUnassigned(r) ? DS.badge("Unassigned", "due") : DS.badge(DS.util.designation(r), "neutral") },
+        { head: "Driving", sort: r => DRIVE_RANK[driving(r)],
+          render: r => {
+            const st = driving(r);
+            if (st === "No-Driving") return DS.badge("No-Driving", "overdue");
+            if (st === "Restrictive") return DS.badge("Restrictive", "due");
+            return el("span", { style: "color:var(--muted)", text: "—" });
+          } },
+      ],
+      facets: [
+        { label: "Designation", options: [["Unassigned", "Unassigned"], ["Primary", "Primary"], ["Secondary", "Secondary"], ["Non-Driver", "Non-Driver"]],
+          test: (r, v) => desigLabel(r) === v },
+        { label: "Driving", options: [["Normal", "Normal"], ["Restrictive", "Restrictive"], ["No-Driving", "No-Driving"]], test: (r, v) => driving(r) === v },
+        { label: "Division", options: distinctOptions(r => r.Division), test: (r, v) => String(r.Division || "") === v },
+      ],
+    });
+    listWrap.appendChild(table.bar);
+    listWrap.appendChild(table.body);
+    showSel.addEventListener("change", () => { rosterState.show = showSel.value; table.setRows(baseRows()); });
+    function paint() { table.refresh(); }   // re-draw after an edit (e.g. designation saved)
 
     function paintDetail() {
       detailWrap.innerHTML = "";
@@ -685,9 +816,6 @@
       });
     }
 
-    search.addEventListener("input", () => { rosterState.search = search.value; paint(); });
-
-    paint();
     paintDetail();
   }
 
@@ -751,6 +879,12 @@
     s.textContent =
       ".detail{max-height:calc(100vh - 96px);overflow-y:auto}" +
       ".dash-quad{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}" +
+      ".st-bar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line-2)}" +
+      ".st-search{flex:1 1 150px;min-width:120px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px;font-family:var(--font)}" +
+      ".st-facet{padding:5px 6px;border:1px solid var(--line);border-radius:6px;font-size:12.5px;background:var(--paper);max-width:170px;font-family:var(--font)}" +
+      ".st-clear{border:none;background:none;color:var(--navy-500);font-size:12.5px;cursor:pointer;padding:4px 2px}" +
+      ".st-sortable{cursor:pointer;user-select:none}" +
+      ".st-sortable:hover{color:var(--navy-700)}" +
       ".dash-wide{grid-column:1/-1}" +
       ".dash-scroll{height:340px;overflow-y:auto}" +
       ".dash-wide .dash-scroll{height:auto;max-height:300px}" +

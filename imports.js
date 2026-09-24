@@ -522,10 +522,11 @@
     DS.data.clear();
     const errCount = errors.length;
     renderMsg(result,
-      "Roster updated \u2014 " + updated + " existing updated, " + created + " added, " + inactivated + " marked inactive." +
-      (errCount ? " " + errCount + " operation(s) failed (see console)." : " Designations were preserved."),
+      "Roster processed \u2014 planned: " + updated + " existing updated, " + created + " added, " + inactivated + " marked inactive. " +
+      (ops.length - errCount) + " of " + ops.length + " operations succeeded." +
+      (errCount ? " Re-running the same file is safe and will retry only what's needed." : " Designations were preserved."),
       errCount ? "warn" : "ok");
-    if (errCount) console.warn("Roster upsert errors:", errors.map(e => e.message));
+    if (errCount) result.querySelector(".card__body").appendChild(errorSummaryEl(errors));
     DS.toast("Roster update complete.", errCount ? "error" : "success");
     state.parsed = null;
   }
@@ -574,9 +575,9 @@
         created + " " + t.label.toLowerCase() + " record(s) imported" +
         (t.mode === "replace" ? " (" + deleted + " old cleared)" : "") +
         (p.dupCount ? ", " + p.dupCount + " skipped as duplicates" : "") +
-        (errCount ? " — " + errCount + " failed (see console)." : "."),
+        (errCount ? " — " + errCount + " failed (details below)." : "."),
         errCount ? "warn" : "ok");
-      if (errCount) console.warn("Import errors:", createErrors.concat(deleteErrors).map(e => e.message));
+      if (errCount) result.querySelector(".card__body").appendChild(errorSummaryEl(createErrors.concat(deleteErrors)));
       DS.toast(created + " " + t.label.toLowerCase() + " record(s) imported.", errCount ? "error" : "success");
       state.parsed = null;
     } catch (e) {
@@ -591,8 +592,22 @@
       el("div", { class: "import-note" + (kind === "warn" ? " warn" : ""), text: msg }))));
   }
 
+  /* ---- on-screen error summary: groups failures by message so 777 errors
+     read as "3 distinct problems" instead of requiring the dev console ---- */
+  function errorSummaryEl(errors) {
+    const counts = {};
+    errors.forEach(e => { const m = (e && e.message) || String(e); counts[m] = (counts[m] || 0) + 1; });
+    const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    console.warn("Write errors:", errors.map(e => e && e.message));   // full list still in the console
+    return el("div", { class: "import-note warn", style: "margin-top:10px" }, [
+      el("div", { text: "What went wrong (" + errors.length + " total, grouped):", style: "font-weight:600; margin-bottom:6px" }),
+      el("ul", { style: "margin:0; padding-left:18px" }, top.map(([m, n]) => el("li", { text: n + " \u00d7 " + m }))),
+    ]);
+  }
+
   DS.registerScreen("imports", { title: "Imports", icon: "▾", render: renderImports });
   DS.ensureXlsx = ensureXlsx;   // shared with the reports export
   DS.runBatched = runBatched;   // shared with the legacy migration tool
+  DS.errorSummaryEl = errorSummaryEl;
 
 })();

@@ -154,7 +154,7 @@
 
   async function renderTickets(container) {
     const [tickets, cache] = await Promise.all([
-      DS.spGet(L.tickets, { orderby: "OpenedOn desc", top: 1000 }),
+      DS.spGet(L.tickets, { orderby: "Id desc", top: 1000 }),
       DS.data.load(),
     ]);
     const cats = cache.idx.ticketCategories;
@@ -385,7 +385,7 @@
         const wb = XLSXlib.utils.book_new();
         for (const e of chosen) {
           status.textContent = "Fetching " + e.label + "…";
-          const rows = await DS.spGet(e.list, { top: 5000 });
+          const rows = await DS.spGet(e.list);   // all pages
           const cleaned = rows.map(cleanRow);
           const ws = XLSXlib.utils.json_to_sheet(cleaned.length ? cleaned : [{ "(no records)": "" }]);
           XLSXlib.utils.book_append_sheet(wb, ws, e.label.slice(0, 31));

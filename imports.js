@@ -280,9 +280,15 @@
       cols: [["Name", "Title"], ["ID", "EmployeeId"], ["Division", "Division"], ["Rank", "Rank"]],
     },
     physicals: {
-      label: "Physicals", list: () => DS.LISTS.physicals, mode: "append",
+      label: "Physicals", list: () => DS.LISTS.physicals, mode: "append-dedup",
       parse: (wb) => parsePhysicals(wb),
       cols: [["Employee", "EmployeeId"], ["Tested", "PhysicalDate"], ["Expires", "ExpirationDate"], ["Result", "Result"]],
+      // one exam per employee per test date — the same exam from any source isn't logged twice
+      dedupKey: r => [String(r.EmployeeId).trim(), DS.isoDate(r.PhysicalDate)].join("|"),
+      existingKeys: async () => {
+        const rows = await DS.spGet(DS.LISTS.physicals, { select: ["EmployeeId", "PhysicalDate"] });
+        return new Set(rows.filter(x => x.PhysicalDate).map(x => [String(x.EmployeeId || "").trim(), DS.isoDate(x.PhysicalDate)].join("|")));
+      },
     },
   };
 
@@ -419,7 +425,7 @@
       if (t.mode === "append-dedup" && t.existingKeys) {
         DS.showLoading(result, "Checking for existing records…");
         const existing = await t.existingKeys();
-        toWrite = records.filter(r => !existing.has(t.dedupKey(r)));
+        toWrite = records.filter(r => { const k = t.dedupKey(r); if (existing.has(k)) return false; existing.add(k); return true; });
         dupCount = records.length - toWrite.length;
       }
       state.parsed = { records, toWrite, dupCount, warnings, fileName: file.name };
@@ -499,7 +505,7 @@
     // update existing: org fields + reactivate; NEVER DriverStatus → designation preserved
     p.toUpdate.forEach(u => ops.push({ kind: "update", id: u.id, fields: Object.assign({}, u.fields, { ActiveEmployee: true }) }));
     // new hires: default designation Primary, active
-    p.toCreate.forEach(r => ops.push({ kind: "create", fields: Object.assign({}, r, { DriverStatus: "Primary", ActiveEmployee: true }) }));
+    p.toCreate.forEach(r => ops.push({ kind: "create", fields: Object.assign({}, r, { ActiveEmployee: true }) }));   // designation left blank → "Needs a designation" on the Dashboard
     // departures: mark inactive (keeps the record + its designation for a possible return)
     if (doInactivate) p.toInactivate.forEach(e => ops.push({ kind: "update", id: e.Id, fields: { ActiveEmployee: false } }));
 

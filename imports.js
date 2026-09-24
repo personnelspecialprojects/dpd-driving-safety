@@ -422,13 +422,22 @@
 
       // dedup preview
       let toWrite = records, dupCount = 0;
+      const onFileDups = [], inFileDups = [];
       if (t.mode === "append-dedup" && t.existingKeys) {
         DS.showLoading(result, "Checking for existing records…");
         const existing = await t.existingKeys();
-        toWrite = records.filter(r => { const k = t.dedupKey(r); if (existing.has(k)) return false; existing.add(k); return true; });
-        dupCount = records.length - toWrite.length;
+        // Two different reasons a row is skipped — tracked separately so the
+        // preview can say which, and list the exact rows.
+        const seen = new Map();
+        toWrite = records.filter(r => {
+          const k = t.dedupKey(r);
+          if (existing.has(k)) { onFileDups.push(r); return false; }
+          if (seen.has(k)) { inFileDups.push({ row: r, first: seen.get(k) }); return false; }
+          seen.set(k, r); return true;
+        });
+        dupCount = onFileDups.length + inFileDups.length;
       }
-      state.parsed = { records, toWrite, dupCount, warnings, fileName: file.name };
+      state.parsed = { records, toWrite, dupCount, onFileDups, inFileDups, warnings, fileName: file.name };
       renderPreview(result, container);
     } catch (e) {
       renderMsg(result, e.message, "warn");
@@ -465,9 +474,13 @@
       doRun = () => runUpsert(result, container, inactivateCb ? inactivateCb.checked : false);
     } else {
       let summary;
-      if (t.mode === "append-dedup") summary = p.toWrite.length + " new \u00b7 " + p.dupCount + " already on file (skipped).";
+      if (t.mode === "append-dedup") summary = p.toWrite.length + " new \u00b7 " +
+        (p.onFileDups || []).length + " already in SharePoint \u00b7 " +
+        (p.inFileDups || []).length + " repeated within this file (skipped).";
       else summary = "Will add " + p.toWrite.length + " record(s).";
       body.appendChild(el("div", { class: "import-note", text: summary }));
+      const skippedList = skippedDetails(t, p);
+      if (skippedList) body.appendChild(skippedList);
       sample = p.toWrite.slice(0, 8);
       confirmLabel = "Import (" + p.toWrite.length + ")";
       doRun = () => runImport(result, container);
@@ -496,6 +509,26 @@
     body.appendChild(el("div", { style: "display:flex; gap:10px; margin-top:18px" }, [confirmBtn, cancelBtn]));
 
     result.appendChild(el("div", { class: "card" }, [head, body]));
+  }
+
+  // Expandable list of every skipped row, so a skip count can be checked
+  // against the source file. In-file repeats are shown beside the row they repeat.
+  function skippedDetails(t, p) {
+    const on = p.onFileDups || [], dup = p.inFileDups || [];
+    if (!on.length && !dup.length) return null;
+    const fmt = (r, c) => { let v = r[c[1]]; if (/date/i.test(c[1])) v = DS.fmtDate(v); return v == null || v === "" ? "\u2014" : String(v); };
+    const head = el("tr", null, [el("th", { text: "Why skipped" })].concat(t.cols.map(c => el("th", { text: c[0] }))));
+    const rows = [];
+    dup.forEach(d => {
+      rows.push(el("tr", null, [el("td", { text: "Repeated in file" })].concat(t.cols.map(c => el("td", { text: fmt(d.row, c) })))));
+      rows.push(el("tr", { style: "color:var(--muted)" }, [el("td", { text: "\u21b3 same as earlier row" })].concat(t.cols.map(c => el("td", { text: fmt(d.first, c) })))));
+    });
+    on.forEach(r => rows.push(el("tr", null, [el("td", { text: "Already in SharePoint" })].concat(t.cols.map(c => el("td", { text: fmt(r, c) }))))));
+    const det = el("details", { style: "margin:4px 0 10px" }, [
+      el("summary", { style: "cursor:pointer; font-size:13px; color:var(--navy-500)", text: "Show the " + (on.length + dup.length) + " skipped row(s)" }),
+      el("div", { style: "overflow-x:auto; margin-top:8px" }, el("table", { class: "tbl" }, [el("thead", null, head), el("tbody", null, rows)])),
+    ]);
+    return det;
   }
 
   async function runUpsert(result, container, doInactivate) {

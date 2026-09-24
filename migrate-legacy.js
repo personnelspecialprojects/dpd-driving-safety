@@ -383,10 +383,11 @@
     const flagged = onRoster.filter(p => !p.designationLocked && p.flags.length);
     const clean = onRoster.filter(p => !p.designationLocked && !p.flags.length && p.suggestedDesignation);
 
+    const needStat = stat(flagged.length, "need your input", flagged.length ? "overdue" : "clear");
     wrap.appendChild(el("div", { class: "migrate-summary" }, [
       stat(onRoster.length, "on current roster"),
       stat(clean.length, "clean — ready to apply"),
-      stat(flagged.length, "need your input", flagged.length ? "overdue" : "clear"),
+      needStat,
       stat(locked.length, "already set — untouched"),
       stat(notOnRoster.length, "not on current roster", notOnRoster.length ? "due" : "clear"),
     ]));
@@ -400,11 +401,19 @@
         "No history workbook loaded — physical exam history and Pending results won't be included. Designations and due dates from Safety Team Main will still be applied." }));
     }
 
+    // Decisions update counts in place — no full re-render, so a click is
+    // visibly kept (picked button + green row) and the page doesn't jump.
+    let refreshCounts = () => {};
+    let flagHead = null;
     if (flagged.length) {
       const card = el("div", { class: "card", style: "margin-bottom:18px" });
-      card.appendChild(el("div", { class: "card__head" }, el("h3", { text: "Needs your input (" + flagged.length + ")" })));
+      flagHead = el("h3", { text: "Needs your input (" + flagged.length + ")" });
+      card.appendChild(el("div", { class: "card__head" }, [
+        flagHead,
+        el("span", { class: "help", text: "Dashed border = suggested. Click to decide." }),
+      ]));
       const body = el("div", null);
-      flagged.forEach(entry => body.appendChild(renderFlagRow(entry, () => renderBody(wrap, container))));
+      flagged.forEach(entry => body.appendChild(renderFlagRow(entry, () => refreshCounts())));
       card.appendChild(body);
       wrap.appendChild(card);
     }
@@ -414,7 +423,21 @@
         notOnRoster.length + " employee(s) in Safety Team Main aren't on the current roster — likely former employees. They won't be written; nothing to do." }));
     }
 
-    const commitBtn = el("button", { class: "btn", text: "Apply to SharePoint (" + (clean.length + Object.keys(state.resolutions).length) + " employees)" });
+    const undecidedNote = el("div", { class: "help", style: "margin-top:8px" });
+    const commitBtn = el("button", { class: "btn" });
+    refreshCounts = () => {
+      const decided = flagged.filter(e => state.resolutions[e.employeeId]).length;
+      const remaining = flagged.length - decided;
+      const applying = Object.values(state.resolutions).filter(r => r && r.designation).length;
+      needStat.firstChild.textContent = String(remaining);
+      needStat.className = "stat stat--" + (remaining ? "overdue" : "clear");
+      if (flagHead) flagHead.textContent = "Needs your input (" + remaining + " of " + flagged.length + " remaining)";
+      if (!commitBtn.disabled) commitBtn.textContent = "Apply to SharePoint (" + (clean.length + applying) + " employees)";
+      undecidedNote.textContent = remaining
+        ? remaining + " still undecided — you can apply now; they'll be left as they are and can be decided on a later run."
+        : "";
+    };
+    refreshCounts();
     commitBtn.addEventListener("click", async () => {
       commitBtn.disabled = true; commitBtn.textContent = "Applying…";
       // live progress — this run can be several thousand writes and take a while
@@ -444,11 +467,11 @@
         DS.toast("Migration applied.", result.errors.length ? "error" : "success");
       } catch (e) {
         progCard.remove();
-        commitBtn.disabled = false; commitBtn.textContent = "Apply to SharePoint";
+        commitBtn.disabled = false; refreshCounts();
         DS.toast("Migration failed: " + e.message, "error");
       }
     });
-    wrap.appendChild(el("div", { style: "margin-top:10px" }, commitBtn));
+    wrap.appendChild(el("div", { style: "margin-top:10px" }, [commitBtn, undecidedNote]));
   }
 
   function stat(n, label, kind) {
@@ -457,7 +480,7 @@
     ]);
   }
 
-  function renderFlagRow(entry, onResolved) {
+  function renderFlagRow(entry, onChange) {
     const flag = entry.flags[0];
     const row = el("div", { class: "flag-row" });
     row.appendChild(el("div", { class: "who" }, [
@@ -466,21 +489,40 @@
     ]));
     row.appendChild(el("div", { class: "raw", text: String(flag.raw) }));
     const choices = el("div", { class: "choices" });
+    const saved = state.resolutions[entry.employeeId];
+    const savedLabel = saved ? (saved.designation || "Skip") : null;
+    if (savedLabel) row.classList.add("resolved");
     ["Primary", "Secondary", "Non-Driver", "Skip"].forEach(opt => {
-      const btn = el("button", { text: opt });
-      if (flag.suggested === opt) btn.classList.add("picked");
-      btn.addEventListener("click", () => {
+      const btn = el("button", { type: "button", text: opt });
+      if (opt === savedLabel) btn.classList.add("picked");
+      // A suggestion is only a hint (dashed border) — it is NOT a decision until clicked.
+      if (flag.suggested === opt) { btn.classList.add("suggested"); btn.title = "Suggested"; }
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault(); ev.stopPropagation();
         state.resolutions[entry.employeeId] = { designation: opt === "Skip" ? null : opt };
         choices.querySelectorAll("button").forEach(b => b.classList.remove("picked"));
         btn.classList.add("picked");
-        entry.flags = []; // resolved — drop from the queue on next redraw
-        onResolved();
+        row.classList.add("resolved");
+        onChange();
       });
       choices.appendChild(btn);
     });
     row.appendChild(choices);
     return row;
   }
+
+  // Styles for decided rows and suggestion hints — injected here so this fix
+  // only requires re-uploading this one file.
+  (function injectStyles() {
+    if (document.getElementById("migrate-legacy-styles")) return;
+    const s = document.createElement("style");
+    s.id = "migrate-legacy-styles";
+    s.textContent =
+      ".flag-row.resolved { background: var(--clear-bg); }" +
+      ".flag-row .choices button.suggested { border-style: dashed; border-color: var(--navy-500); }" +
+      ".flag-row .choices button.picked { background: var(--navy-700); color: #fff; border-color: var(--navy-700); border-style: solid; }";
+    document.head.appendChild(s);
+  })();
 
   DS.registerScreen("migrate", { title: "Legacy Migration", icon: "⚑", render: renderMigrate });
 })();

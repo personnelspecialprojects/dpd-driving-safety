@@ -608,6 +608,7 @@
     const s = document.createElement("style");
     s.id = "roster-records-styles";
     s.textContent =
+      ".detail{max-height:calc(100vh - 96px);overflow-y:auto}" +
       ".rec-actions{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 14px}" +
       ".rec-list{margin-bottom:12px}" +
       ".rec-head{font-size:11.5px;font-weight:600;color:var(--slate);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}" +

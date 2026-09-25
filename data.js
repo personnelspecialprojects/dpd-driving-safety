@@ -49,7 +49,68 @@
   function courseRequired(r) { return designation(r) !== "Non-Driver"; }            // Primary + Secondary
 
   /* ---- misc row helpers ---- */
-  function empKey(v) { return String(v == null ? "" : v).trim(); }
+  /* ---- Identity -----------------------------------------------------------
+     Employee IDs are compared without leading zeros (055411 = 55411).
+     Some source files use badge numbers instead, so every upload is matched
+     through DS.ids.resolve: Employee Number first, then Badge (incl. R/T
+     badges). Names never link a record by themselves — they only break a
+     tie when a number is one person's Employee # and another's badge, and
+     suggest likely matches for rows that match no one. */
+  function empKey(v) {
+    const s = String(v == null ? "" : v).trim().toUpperCase();
+    return /^\d+$/.test(s) ? (s.replace(/^0+/, "") || "0") : s;
+  }
+  function normBadge(v) {
+    const s = String(v == null ? "" : v).trim().toUpperCase().replace(/\s+/g, "");
+    if (!s) return "";
+    const m = s.match(/^([A-Z]*)0*(\d+)$/);
+    return m ? m[1] + m[2] : s;
+  }
+  function nameTokens(v) {
+    return String(v || "").toUpperCase().replace(/[^A-Z\s,'-]/g, " ").split(/[\s,]+/).filter(Boolean);
+  }
+  // 0 = no match, 1 = last name matches, 2 = last + first name match
+  function nameScore(r, name) {
+    if (!r || !name) return 0;
+    const nt = new Set(nameTokens(name));
+    const last = nameTokens(r.LastName);
+    if (!last.length || !last.every(t => nt.has(t))) return 0;
+    const first = nameTokens(r.Title).filter(t => !last.includes(t))[0];
+    return first && nt.has(first) ? 2 : 1;
+  }
+  DS.ids = {
+    empKey, normBadge, nameScore,
+    index(roster) {
+      const byEmp = new Map(), byBadge = new Map();
+      const add = (m, k, r) => { if (!k) return; if (!m.has(k)) m.set(k, []); m.get(k).push(r); };
+      roster.forEach(r => { add(byEmp, empKey(r.EmployeeId), r); add(byBadge, normBadge(r.Badge), r); });
+      return { byEmp, byBadge, roster };
+    },
+    // → { rec, method: "employee" | "badge" | null, conflict?, byName?, other?, suggestions? }
+    resolve(ix, id, name) {
+      const raw = String(id == null ? "" : id).trim();
+      const pick = list => list.find(isActive) || list[0];
+      const e = raw ? (ix.byEmp.get(empKey(raw)) || []) : [];
+      // A value can be a badge only if it has a letter prefix (R/T...) or is 5 digits or fewer as
+      // written. A 6-digit number like 055411 is an Employee #, never a badge.
+      const badgeLike = /[A-Za-z]/.test(raw) || raw.replace(/\D/g, "").length <= 5;
+      const b = raw && badgeLike ? (ix.byBadge.get(normBadge(raw)) || []) : [];
+      const eR = e.length ? pick(e) : null, bR = b.length ? pick(b) : null;
+      if (eR && bR && eR !== bR) {                       // one person's Employee #, another's badge
+        const se = nameScore(eR, name), sb = nameScore(bR, name);
+        if (sb > se) return { rec: bR, method: "badge", conflict: true, byName: true, other: eR };
+        return { rec: eR, method: "employee", conflict: true, byName: se > sb, other: bR };
+      }
+      if (eR) return { rec: eR, method: "employee" };
+      if (bR) return { rec: bR, method: "badge" };
+      let suggestions = [];
+      if (name) {
+        suggestions = ix.roster.filter(r => nameScore(r, name) === 2);
+        if (!suggestions.length) suggestions = ix.roster.filter(r => nameScore(r, name) === 1 && isActive(r)).slice(0, 3);
+      }
+      return { rec: null, method: null, suggestions: suggestions.slice(0, 3) };
+    },
+  };
   function isActive(r) {
     const v = r.ActiveEmployee;
     return v === true || v === 1 || String(v).toLowerCase() === "yes";
@@ -112,6 +173,7 @@
         .split(";").map(t => t.trim()).filter(Boolean),
       allowMark: config.AllowMarkAsAwarded === true || String(config.AllowMarkAsAwarded).toLowerCase() === "yes",
       rosterByEmp: {},
+      ids: DS.ids.index(cache.roster),
       activeRoster: [],
       courseLatest: {},     // emp -> { title -> Date }
       physLatest: {},       // emp -> physical record (most recent by PhysicalDate)
@@ -124,7 +186,7 @@
 
     cache.roster.forEach(r => {
       const emp = empKey(r.EmployeeId);
-      if (emp) idx.rosterByEmp[emp] = r;
+      if (emp && (!idx.rosterByEmp[emp] || isActive(r))) idx.rosterByEmp[emp] = r;
       if (isActive(r)) idx.activeRoster.push(r);
     });
 

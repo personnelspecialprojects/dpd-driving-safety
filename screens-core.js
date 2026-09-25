@@ -95,8 +95,8 @@
     function draw() {
       const vis = visible();
       if (o.countEl) {
-        const n = rows.length, noun = o.noun || "employee";
-        o.countEl.textContent = (vis.length === n ? "" : vis.length + " of ") + n + " " + noun + (n === 1 ? "" : "s");
+        const n = rows.length, noun = o.noun || "employee", plural = o.nounPlural || noun + "s";
+        o.countEl.textContent = (vis.length === n ? "" : vis.length + " of ") + n + " " + (n === 1 ? noun : plural);
       }
       body.innerHTML = "";
       if (!rows.length) { body.appendChild(emptyMini(o.emptyText || "Nothing to show.")); return; }
@@ -263,7 +263,7 @@
       emptyText: "Everyone on the active roster has a designation.",
       columns: [
         nameCol,
-        { head: "ID", tdClass: "nowrap", render: r => el("span", { class: "tnum", text: r.employeeId }), sort: r => r.employeeId },
+        { head: "ID", tdClass: "nowrap", render: r => el("span", { class: "tnum", text: String(r.record.EmployeeId || r.employeeId) }), sort: r => r.employeeId },
         { head: "Rank", render: r => r.rank || "\u2014", sort: r => r.rank },
         { head: "Assign", tdClass: "nowrap", render: r => assignSelect(r, assignedOne) },
       ],
@@ -393,7 +393,7 @@
   async function renderRoster(container) {
     const cache = await DS.data.load();
     const preselect = routeParam();
-    if (preselect) rosterState.selected = preselect;
+    if (preselect) rosterState.selected = DS.util.empKey(preselect);
 
     container.innerHTML = "";
 
@@ -422,8 +422,8 @@
 
     const table = smartTable({
       key: "roster", rows: baseRows(), countEl: countPill, limit: 400, defaultSort: [0, 1],   // last name A→Z
-      placeholder: "Search by name or employee ID",
-      search: r => [r.Title, r.LastName, r.EmployeeId].join(" "),
+      placeholder: "Search by name, employee # or badge",
+      search: r => [r.Title, r.LastName, r.EmployeeId, r.Badge].join(" "),
       onRow: r => { rosterState.selected = DS.util.empKey(r.EmployeeId); table.refresh(); paintDetail(); },
       rowClass: r => DS.util.empKey(r.EmployeeId) === rosterState.selected ? "selected" : "",
       emptyText: "No employees in this view.",
@@ -474,6 +474,7 @@
       body.appendChild(el("div", { class: "detail__name", text: r.Title || "—" }));
       body.appendChild(el("div", { class: "detail__sub", text: [r.EmployeeId, r.Rank].filter(Boolean).join(" · ") || "—" }));
 
+      if (String(r.Badge || "").trim()) body.appendChild(detailRow("Badge", String(r.Badge)));
       body.appendChild(detailRow("Employment", employmentControl(r)));
       body.appendChild(detailRow("Division", r.Division || "—"));
       body.appendChild(detailRow("Assignment", r.Assignment || "—"));
@@ -836,41 +837,133 @@
   /* ============================================================
      AUDIT LOG
      ============================================================ */
+  /* ============================================================
+     AUDIT LOG — two tabs: Activity (every action) and Upload results
+     (one entry per upload/migration, with the rows that need review)
+     ============================================================ */
+  let auditTab = "activity";
   async function renderAudit(container) {
+    container.innerHTML = "";
+    const seg = el("div", { class: "seg" });
+    [["activity", "Activity"], ["uploads", "Upload results"]].forEach(([k, label]) => {
+      const b = el("button", { type: "button", text: label });
+      if (k === auditTab) b.classList.add("active");
+      b.addEventListener("click", () => { auditTab = k; renderAudit(container); });
+      seg.appendChild(b);
+    });
+    container.appendChild(seg);
+    const body = el("div");
+    container.appendChild(body);
+    DS.showLoading(body);
+    if (auditTab === "uploads") await renderUploadResults(body);
+    else await renderActivity(body);
+  }
+
+  async function renderActivity(container) {
     const rows = await DS.spGet(DS.LISTS.audit, { orderby: "Id desc", top: 500 });
     container.innerHTML = "";
-
-    const types = Array.from(new Set(rows.map(r => r.ActionType).filter(Boolean))).sort();
-    const filter = el("select", { class: "field" }, [
-      el("option", { value: "", text: "All action types" }),
-      ...types.map(t => el("option", { value: t, text: t })),
-    ]);
-    container.appendChild(el("div", { class: "toolbar" }, [
-      filter,
-      el("span", { class: "count-pill", id: "auditCount" }),
-    ]));
-
-    const tableWrap = el("div", { class: "card" });
-    container.appendChild(tableWrap);
-
-    function paint() {
-      const t = filter.value;
-      const view = t ? rows.filter(r => r.ActionType === t) : rows;
-      document.getElementById("auditCount").textContent =
-        view.length + (view.length === 1 ? " entry" : " entries");
-      tableWrap.innerHTML = "";
-      if (!view.length) { tableWrap.appendChild(emptyMini("No matching activity.")); return; }
-      tableWrap.appendChild(buildTable([
-        { head: "When", thClass: "nowrap", tdClass: "nowrap", render: r => el("span", { class: "tnum", text: DS.fmtDateTime(r.ActionTimestamp) }) },
-        { head: "Who", render: r => el("span", { text: DS.emailLocal(r.Actor) || r.Actor || "—" }) },
-        { head: "Action", render: r => DS.badge(r.ActionType || "—", "neutral") },
-        { head: "Detail", render: r => r.Detail || "—" },
-      ], view));
-    }
-
-    filter.addEventListener("change", paint);
-    paint();
+    const pill = el("span", { class: "count-pill" });
+    container.appendChild(el("div", { class: "toolbar" }, [el("span", { class: "help", text: "Most recent 500 actions" }), pill]));
+    const t = smartTable({
+      key: "audit-activity", rows, countEl: pill, noun: "entry", nounPlural: "entries",
+      placeholder: "Search who, action, or detail",
+      search: r => [r.Actor, r.ActionType, r.Detail, r.TargetId].join(" "),
+      emptyText: "No activity yet.",
+      columns: [
+        { head: "When", thClass: "nowrap", tdClass: "nowrap", sort: r => DS.parseDate(r.ActionTimestamp), dir: -1,
+          render: r => el("span", { class: "tnum", text: DS.fmtDateTime(r.ActionTimestamp) }) },
+        { head: "Who", sort: r => DS.emailLocal(r.Actor), render: r => el("span", { text: DS.emailLocal(r.Actor) || r.Actor || "\u2014" }) },
+        { head: "Action", sort: r => r.ActionType, render: r => DS.badge(r.ActionType || "\u2014", "neutral") },
+        { head: "Detail", render: r => r.Detail || "\u2014" },
+      ],
+      facets: [{ label: "Action", options: distinctOptions(r => r.ActionType), test: (r, v) => r.ActionType === v }],
+    });
+    container.appendChild(el("div", { class: "card" }, [t.bar, t.body]));
   }
+
+  const COUNT_LABELS = {
+    rows: "Rows in file", added: "Added", updated: "Updated", inactivated: "Marked inactive",
+    byEmployeeNumber: "Matched by employee #", byBadge: "Matched by badge", noMatch: "Matched no one",
+    matchedTwoPeople: "Two possible people (unsettled)", resolvedByName: "Two possible people (name confirmed)", alreadyInSharePoint: "Already in SharePoint",
+    repeatedInFile: "Repeated in file", onlySomeCourses: "Only some required courses",
+    noEmployeeNumber: "No employee number", failed: "Failed to save",
+    employees: "Employees in sheet", designationsSet: "Designations set", physicalsAdded: "Physical records added",
+    coursesAdded: "Course records added", alreadyOnFile: "Already on file", notOnRoster: "Not on roster",
+    historyRowsUnmatched: "Exam-history rows unmatched",
+  };
+  const BAD_COUNTS = ["noMatch", "matchedTwoPeople", "failed", "noEmployeeNumber", "notOnRoster", "historyRowsUnmatched"];
+
+  async function renderUploadResults(container) {
+    let raw;
+    try { raw = await DS.spGet(DS.LISTS.uploads, { orderby: "Id desc", top: 300 }); }
+    catch (e) {
+      container.innerHTML = "";
+      container.appendChild(el("div", { class: "card" }, el("div", { class: "card__body" }, [
+        el("h3", { text: "Upload results aren't set up yet", style: "font-size:15px; margin-bottom:8px" }),
+        el("div", { class: "import-note", text: "Create a SharePoint list named DrivingSafety_UploadLog with two columns: UploadType (Single line of text) and Details (Multiple lines of text \u2014 Plain text). Every upload and migration run is recorded automatically after that." }),
+        el("div", { class: "help", text: "SharePoint said: " + e.message }),
+      ])));
+      return;
+    }
+    const items = raw.map(r => {
+      let d = {};
+      try { d = JSON.parse(r.Details || "{}"); } catch (_) {}
+      const counts = d.counts || {};
+      const added = counts.added != null ? counts.added : (counts.physicalsAdded || 0) + (counts.coursesAdded || 0);
+      return { id: r.Id, type: r.UploadType || d.type || "", file: r.Title || d.file || "", at: d.at || r.Created, by: d.by || "",
+        counts, added, review: d.review || 0, problems: d.problems || [], truncated: !!d.truncated, warnings: d.warnings || [] };
+    });
+    container.innerHTML = "";
+    const pill = el("span", { class: "count-pill" });
+    container.appendChild(el("div", { class: "toolbar" }, [
+      el("span", { class: "help", text: "One entry per upload or migration run. Click an entry to see which rows need review." }), pill]));
+    const detail = el("div", { style: "margin-top:18px" });
+    let selected = null;
+    const t = smartTable({
+      key: "audit-uploads", rows: items, countEl: pill, noun: "upload",
+      placeholder: "Search file, type, or person",
+      search: x => [x.file, x.type, x.by].join(" "),
+      emptyText: "No uploads recorded yet. Uploads are logged from now on.",
+      onRow: x => { selected = x.id; t.refresh(); showDetail(x); },
+      rowClass: x => x.id === selected ? "selected" : "",
+      columns: [
+        { head: "When", tdClass: "nowrap", sort: x => DS.parseDate(x.at), dir: -1, render: x => el("span", { class: "tnum", text: DS.fmtDateTime(x.at) }) },
+        { head: "Type", sort: x => x.type, render: x => DS.badge(x.type || "\u2014", "neutral") },
+        { head: "File", sort: x => x.file, render: x => x.file || "\u2014" },
+        { head: "By", sort: x => DS.emailLocal(x.by), render: x => DS.emailLocal(x.by) || "\u2014" },
+        { head: "Rows", thClass: "num", tdClass: "num", sort: x => x.counts.rows || x.counts.employees || 0, render: x => String(x.counts.rows != null ? x.counts.rows : (x.counts.employees || "\u2014")) },
+        { head: "Added", thClass: "num", tdClass: "num", sort: x => x.added, render: x => String(x.added) },
+        { head: "Health", sort: x => x.review, dir: -1,
+          render: x => x.review ? DS.badge(x.review + " to review", "overdue") : DS.badge("Clean", "clear") },
+      ],
+      facets: [
+        { label: "Type", options: distinctOptions(x => x.type), test: (x, v) => x.type === v },
+        { label: "Health", options: [["review", "Needs review"], ["clean", "Clean"]], test: (x, v) => (x.review ? "review" : "clean") === v },
+      ],
+    });
+    container.appendChild(el("div", { class: "card" }, [t.bar, t.body]));
+    container.appendChild(detail);
+
+    function showDetail(x) {
+      detail.innerHTML = "";
+      const grid = el("div", { class: "migrate-summary" }, Object.keys(x.counts).filter(k => COUNT_LABELS[k]).map(k => {
+        const v = x.counts[k];
+        const kind = BAD_COUNTS.includes(k) && v ? "overdue" : null;
+        return el("div", { class: "stat" + (kind ? " stat--" + kind : "") }, [el("b", { class: "tnum", text: String(v) }), el("span", { text: COUNT_LABELS[k] })]);
+      }));
+      const body = el("div", { class: "card__body" }, [grid]);
+      x.warnings.forEach(w => body.appendChild(el("div", { class: "import-note warn", text: w })));
+      if (x.problems.length && DS.problemsDetails) body.appendChild(DS.problemsDetails(x.problems, x.file || x.type, true));
+      else body.appendChild(el("div", { class: "import-note", text: "Nothing to review \u2014 every row was matched and saved." }));
+      if (x.truncated) body.appendChild(el("div", { class: "help", text: "This upload had more problem rows than the log can hold; the list above is trimmed. The counts are complete." }));
+      detail.appendChild(el("div", { class: "card" }, [
+        el("div", { class: "card__head" }, [el("h3", { text: (x.file || x.type) + " \u2014 " + DS.fmtDateTime(x.at) }), DS.badge(x.type, "neutral")]),
+        body,
+      ]));
+      if (detail.scrollIntoView) detail.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
 
   (function injectRecordStyles() {
     if (document.getElementById("roster-records-styles")) return;

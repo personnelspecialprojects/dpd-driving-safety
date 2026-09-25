@@ -89,6 +89,20 @@
     // → { rec, method: "employee" | "badge" | null, conflict?, byName?, other?, suggestions? }
     resolve(ix, id, name) {
       const raw = String(id == null ? "" : id).trim();
+      // Combined values like "123456/8812" (employee # and badge in one cell): try each part.
+      const parts = raw.split(/[\/\\|,;]+/).map(x => x.trim()).filter(Boolean);
+      if (parts.length > 1) {
+        const hits = parts.map(pt => DS.ids.resolve(ix, pt, name)).filter(h => h.rec);
+        const recs = Array.from(new Set(hits.map(h => h.rec)));
+        if (recs.length === 1) return Object.assign({}, hits[0], { split: true });
+        if (recs.length > 1) {
+          const scored = recs.map(r => [r, nameScore(r, name)]).sort((a, b) => b[1] - a[1]);
+          const top = scored[0][0], decided = scored[0][1] > scored[1][1];
+          const hit = hits.find(h => h.rec === top);
+          return { rec: top, method: hit.method, conflict: true, byName: decided, other: scored[1][0], split: true };
+        }
+        return DS.ids.resolve(ix, "", name);             // no part matched → name suggestions only
+      }
       const pick = list => list.find(isActive) || list[0];
       const e = raw ? (ix.byEmp.get(empKey(raw)) || []) : [];
       // A value can be a badge only if it has a letter prefix (R/T...) or is 5 digits or fewer as

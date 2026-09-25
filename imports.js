@@ -464,7 +464,12 @@
       records.forEach(r => {
         const res = DS.ids.resolve(ix, r.EmployeeId, r.__name);
         r.__sourceId = String(r.EmployeeId == null ? "" : r.EmployeeId).trim();
-        if (!res.rec) { unmatched.push({ row: r, suggestions: res.suggestions || [] }); return; }
+        if (!res.rec) {
+          const sug = res.suggestions || [];
+          const full = sug.filter(x => DS.ids.nameScore(x, r.__name) === 2);
+          unmatched.push({ row: r, suggestions: sug, nameCandidate: full.length === 1 ? full[0] : null });
+          return;
+        }
         match[res.method]++;
         r.__method = res.method;
         if (res.conflict) conflicts.push({ row: r, chosen: res.rec, other: res.other, byName: res.byName });
@@ -486,6 +491,14 @@
           seen.set(k, r); return true;
         });
         dupCount = onFileDups.length + inFileDups.length;
+        // Rows that could be matched by name (opt-in): prepare them now, with the same duplicate checks
+        var nameWrite = [];
+        unmatched.filter(u => u.nameCandidate).forEach(u => {
+          const r2 = Object.assign({}, u.row, { EmployeeId: String(u.nameCandidate.EmployeeId).trim(), Title: u.nameCandidate.Title || "", __method: "name" });
+          const k = t.dedupKey(r2);
+          if (existing.has(k) || seen.has(k)) return;
+          seen.set(k, r2); nameWrite.push(r2);
+        });
       }
 
       // Courses: people this file has only some of the required courses for
@@ -501,7 +514,9 @@
           .map(x => ({ row: x.row, has: req.filter(tt => x.titles.has(tt)), missing: req.filter(tt => !x.titles.has(tt)) }));
       }
 
-      state.parsed = { records, toWrite, dupCount, onFileDups, inFileDups, warnings, fileName: file.name, match, unmatched, conflicts, partial };
+      state.parsed = { records, toWrite, dupCount, onFileDups, inFileDups, warnings, fileName: file.name, match, unmatched, conflicts, partial,
+        nameWrite: typeof nameWrite !== "undefined" ? nameWrite : [] };
+      state.useNameMatch = false;
       renderPreview(result, container);
     } catch (e) {
       renderMsg(result, e.message, "warn");
@@ -520,7 +535,7 @@
     const body = el("div", { class: "card__body" });
 
     let sample = p.records.slice(0, 8);
-    let confirmLabel, doRun, inactivateCb = null;
+    let confirmLabel, doRun, inactivateCb = null, updateConfirm = null;
 
     if (p.mode === "upsert") {
       body.appendChild(el("div", { class: "import-note", text:
@@ -549,6 +564,12 @@
           "Matched to the roster: " + p.match.employee + " by employee number \u00b7 " + p.match.badge + " by badge" +
           (um ? " \u00b7 " + um + " row(s) match no one and will be skipped" : "") +
           (cf ? " \u00b7 " + cf + " number(s) belong to two people and the name didn't settle it \u2014 check below" : "") + "." }));
+        if ((p.nameWrite || []).length) {
+          const cb = el("input", { type: "checkbox" }); cb.checked = !!state.useNameMatch;
+          cb.addEventListener("change", () => { state.useNameMatch = cb.checked; if (updateConfirm) updateConfirm(); });
+          body.appendChild(el("label", { class: "check", style: "margin:2px 0 10px; align-items:flex-start" }, [cb,
+            el("span", { text: "Also match " + p.nameWrite.length + " of those row(s) by name \u2014 the ID matched no one, but exactly one person on the roster has the same first and last name (likely a mistyped ID). They'll be listed in Upload results so you can spot-check them." })]));
+        }
       }
       sample = p.toWrite.slice(0, 8);
       confirmLabel = "Import (" + p.toWrite.length + ")";
@@ -574,6 +595,13 @@
 
     const confirmBtn = el("button", { class: "btn", text: confirmLabel });
     confirmBtn.disabled = (p.mode !== "upsert" && p.toWrite.length === 0);
+    if (p.mode !== "upsert") {
+      updateConfirm = () => {
+        const n = p.toWrite.length + (state.useNameMatch ? (p.nameWrite || []).length : 0);
+        confirmBtn.textContent = "Import (" + n + ")"; confirmBtn.disabled = n === 0;
+      };
+      updateConfirm();
+    }
     const cancelBtn = el("button", { class: "btn btn--ghost", text: "Cancel" });
     cancelBtn.addEventListener("click", () => { state.parsed = null; document.getElementById("importResult").innerHTML = ""; });
     confirmBtn.addEventListener("click", doRun);
@@ -589,8 +617,16 @@
     const base = r => ({ row: r.__row || "", id: r.__sourceId != null ? r.__sourceId : String(r.EmployeeId || ""),
       name: r.__name || r.Title || "", info: t && t.describe ? t.describe(r) : "" });
     (failed || []).forEach(e => { const it = e.item && (e.item.fields || e.item); out.push(Object.assign(it ? base(it) : { row: "", id: "", name: "", info: "" }, { why: "Failed to save", note: e.message || String(e) })); });
-    (p.unmatched || []).forEach(u => out.push(Object.assign(base(u.row), { why: "No match on roster",
-      note: u.suggestions && u.suggestions.length ? "Possible: " + u.suggestions.map(x => (x.Title || "?") + " (#" + x.EmployeeId + (x.Badge ? ", badge " + x.Badge : "") + ")").join("; ") : "No likely match by name" })));
+    (p.unmatched || []).forEach(u => {
+      if (p.usedNameMatch && u.nameCandidate) {
+        out.push(Object.assign(base(u.row), { why: "Matched by name (ID didn't match)",
+          note: "Saved to " + (u.nameCandidate.Title || "?") + " (#" + u.nameCandidate.EmployeeId + (u.nameCandidate.Badge ? ", badge " + u.nameCandidate.Badge : "") + ")" }));
+        return;
+      }
+      out.push(Object.assign(base(u.row), { why: "No match on roster",
+        note: u.suggestions && u.suggestions.length ? "Possible: " + u.suggestions.map(x => (x.Title || "?") + " (#" + x.EmployeeId + (x.Badge ? ", badge " + x.Badge : "") + ")").join("; ")
+          : "Likely a former employee or a mistyped ID" }));
+    });
     (p.conflicts || []).forEach(c => out.push(Object.assign(base(c.row), { why: c.byName ? "Two possible people (name confirmed)" : "Two possible people",
       note: "Saved to " + (c.chosen.Title || "?") + " (#" + c.chosen.EmployeeId + ", by " + (c.row.__method === "badge" ? "badge" : "employee #") + ")" +
         (c.byName ? ", which the name in the file agrees with" : ", but the name in the file didn't settle it") +
@@ -718,9 +754,12 @@
     }
 
     try {
-      const createErrors = await runBatched(p.toWrite, rec => DS.spCreate(listName, stripMeta(rec)),
+      p.usedNameMatch = !!state.useNameMatch && (p.nameWrite || []).length > 0;
+      const writes = p.usedNameMatch ? p.toWrite.concat(p.nameWrite) : p.toWrite;
+      const createErrors = await runBatched(writes, rec => DS.spCreate(listName, stripMeta(rec)),
         (d, tot, label) => progress(d, tot, label || "Adding records"));
-      const created = p.toWrite.length - createErrors.length;
+      const created = writes.length - createErrors.length;
+      const byName = p.usedNameMatch ? p.nameWrite.length : 0;
 
       await DS.audit("Bulk import \u2014 " + t.label, listName, null,
         "Imported: " + created + " added" + (p.dupCount ? ", " + p.dupCount + " duplicates skipped" : "") +
@@ -729,8 +768,8 @@
       const problems = problemRows(t, p, createErrors);
       const m = p.match || { employee: 0, badge: 0 };
       const logged = await logUpload({ type: t.label, file: p.fileName, warnings: p.warnings, problems, counts: {
-        rows: p.records.length, added: created, byEmployeeNumber: m.employee, byBadge: m.badge,
-        noMatch: (p.unmatched || []).length, matchedTwoPeople: (p.conflicts || []).filter(c => !c.byName).length,
+        rows: p.records.length, added: created, byEmployeeNumber: m.employee, byBadge: m.badge, byName,
+        noMatch: (p.unmatched || []).length - byName, matchedTwoPeople: (p.conflicts || []).filter(c => !c.byName).length,
         resolvedByName: (p.conflicts || []).filter(c => c.byName).length,
         alreadyInSharePoint: (p.onFileDups || []).length, repeatedInFile: (p.inFileDups || []).length,
         onlySomeCourses: (p.partial || []).length, failed: createErrors.length } });
@@ -738,7 +777,7 @@
       DS.data.clear();  // recompute dashboard/roster off fresh data next visit
 
       const errCount = createErrors.length;
-      const um = (p.unmatched || []).length;
+      const um = (p.unmatched || []).length - byName;
       renderMsg(result,
         created + " " + t.label.toLowerCase() + " record(s) imported" +
         (p.dupCount ? ", " + p.dupCount + " skipped as duplicates" : "") +

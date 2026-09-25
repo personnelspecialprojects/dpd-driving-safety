@@ -421,6 +421,14 @@ textarea.field { resize: vertical; min-height: 74px; line-height: 1.45; }
 .format-hint__note { font-size: 11.5px; color: var(--muted); margin-top: 8px; max-width: 320px; white-space: normal; }
 @media (max-width: 480px) { .format-hint__pop { left: auto; right: -8px; max-width: 82vw; } }
 
+/* ---- Background job indicator (uploads keep running across screens) ---- */
+#jobPill {
+  position: fixed; left: 22px; bottom: 22px; z-index: 110; display: none;
+  background: var(--navy-900); color: #fff; border-radius: 999px; padding: 9px 16px;
+  font-size: 13px; box-shadow: 0 6px 20px rgba(15,30,56,.3); align-items: center; gap: 10px;
+}
+#jobPill .spinner { width: 14px; height: 14px; border-width: 2px; margin: 0; border-color: rgba(255,255,255,.3); border-top-color: #fff; }
+
 /* ---- Responsive ---- */
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; }
@@ -482,6 +490,7 @@ textarea.field { resize: vertical; min-height: 74px; line-height: 1.45; }
 </div>
 
 <div id="toasts" aria-live="polite"></div>
+<div id="jobPill" role="status" aria-live="polite"><div class="spinner"></div><span id="jobText"></span></div>
 
 <!-- ============ MSAL (v2.35.0, CDN with fallback) ============ -->
 <script src="https://alcdn.msauth.net/browser/2.35.0/js/msal-browser.min.js"
@@ -849,6 +858,40 @@ DS.spFieldExists = async function (listName, field) {
   try { await spFetch(listUrl(listName) + "/fields/getbyinternalnameortitle('" + encodeURIComponent(field) + "')?$select=InternalName"); return true; }
   catch (e) { return false; }
 };
+
+/* ---- Background jobs ----
+   Uploads keep saving while the user looks at other screens; only closing or
+   reloading the tab stops them. This shows a progress pill on every screen,
+   warns before the tab is closed, and blocks starting a second upload while
+   one is running (two runs at once could both add the same records). */
+DS.job = {
+  active: null,
+  start(label, total) {
+    this.active = { label: label || "Saving to SharePoint", done: 0, total: total || 0 };
+    document.getElementById("jobPill").style.display = "flex";
+    this.render();
+  },
+  update(done, total, note) {
+    if (!this.active) return;
+    this.active.done = done; this.active.total = total; this.active.note = note || "";
+    this.render();
+  },
+  render() {
+    const a = this.active; if (!a) return;
+    document.getElementById("jobText").textContent = a.label + ": " + a.done.toLocaleString() + " of " + a.total.toLocaleString() +
+      (a.note ? " \u2014 " + a.note : "") + " \u00b7 keep this tab open";
+  },
+  end() { this.active = null; document.getElementById("jobPill").style.display = "none"; },
+  // true (with a message) if something is already running
+  busy() {
+    if (!this.active) return false;
+    DS.toast("An upload is still running (" + this.active.done + " of " + this.active.total + "). Wait for it to finish before starting another.", "error");
+    return true;
+  },
+};
+window.addEventListener("beforeunload", e => {
+  if (DS.job.active) { e.preventDefault(); e.returnValue = "An upload is still saving. Leaving now will stop it partway."; return e.returnValue; }
+});
 
 /* Audit log convenience — every mutating screen calls this. */
 DS.audit = async function (actionType, targetList, targetId, detail) {

@@ -56,6 +56,7 @@
     const physDefault = numInput(g("PhysicalDefaultYears", 2));
     const awardMilestone = numInput(g("AwardMilestoneYears", 5));
     const resetThreshold = numInput(g("AwardResetPointThreshold", 0));
+    const recordsStart = el("input", { class: "field", type: "date", value: DS.isoDate(g("AccidentRecordsStartDate", "")) || "" });
     // driving eligibility (points)
     const rolloff = numInput(g("PointRolloffMonths", 24));
     const restrictivePts = numInput(g("RestrictivePoints", 4));
@@ -84,6 +85,7 @@
         field("Physical fallback cycle (years)", physDefault, "Used only when a physical has no expiration date."),
         field("Award milestone interval (years)", awardMilestone, "Years between safe-driving award milestones."),
         field("Points that reset the award streak", resetThreshold, "An accident with more than this many final points resets the streak. 0 = any points."),
+        field("Accident records complete from (optional)", recordsStart, "Leave blank \u2014 awards count safe driving from the oldest accident in the uploaded data. Only set this to override that date. With no accident records, no one is award-eligible."),
       ]),
 
       el("div", { class: "section-title", text: "Driving eligibility (accident points)" }),
@@ -130,6 +132,7 @@
         DigestRecipients: recipients.value.trim(),
         AllowMarkAsAwarded: allowMark.checked,
       };
+      if (recordsStart.value || (cfg && cfg.AccidentRecordsStartDate)) fields.AccidentRecordsStartDate = recordsStart.value || null;
       try {
         if (cfg) await DS.spUpdate(L.config, cfg.Id, fields);
         else { fields.Title = "Config"; await DS.spCreate(L.config, fields); }

@@ -327,8 +327,11 @@
      since a big burst of simultaneous requests is what triggers throttling in
      the first place. ---- */
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-  async function runBatched(items, worker, onProgress, concurrency) {
+  async function runBatched(items, worker, onProgress, concurrency, jobLabel) {
     concurrency = concurrency || 4;
+    const ownsJob = !DS.job.active;                     // outermost batch owns the indicator
+    if (ownsJob) DS.job.start(jobLabel, items.length);
+    const report = (d, total, label) => { DS.job.update(d, total, label); onProgress(d, total, label); };
     if (items.length > 500) concurrency = Math.min(concurrency, 2);   // ease off for big batches
     const MAX_ATTEMPTS = 5;
     let done = 0, retried = 0;
@@ -345,7 +348,7 @@
             entry.attempt++;
             retried++;
             const wait = e.retryAfterMs || Math.min(20000, 400 * Math.pow(2, entry.attempt));
-            onProgress(done, items.length, "Waiting to retry after a busy response (" + retried + " so far)…");
+            report(done, items.length, "Waiting to retry after a busy response (" + retried + " so far)…");
             await sleep(wait);
             queue.push(entry);   // back of the line, not counted as done yet
             continue;
@@ -353,10 +356,11 @@
           if (e && typeof e === "object") e.item = entry.item;
           errors.push(e);
         }
-        done++; onProgress(done, items.length);
+        done++; report(done, items.length);
       }
     }
-    await Promise.all(Array.from({ length: Math.min(concurrency, items.length || 1) }, lane));
+    try { await Promise.all(Array.from({ length: Math.min(concurrency, items.length || 1) }, lane)); }
+    finally { if (ownsJob) DS.job.end(); }
     return errors;
   }
 
@@ -690,6 +694,7 @@
     "Couldn't save to Upload results \u2014 create the DrivingSafety_UploadLog list (see setup notes).";
 
   async function runUpsert(result, container, doInactivate) {
+    if (DS.job.busy()) return;
     const p = state.parsed;
     const t = TYPES.roster;
     const listName = DS.LISTS.roster;
@@ -712,7 +717,7 @@
     const errors = await runBatched(ops, async op => {
       if (op.kind === "create") await DS.spCreate(listName, op.fields);
       else await DS.spUpdate(listName, op.id, op.fields);
-    }, (done, total, label) => { barFill.style.width = (total ? done / total * 100 : 100) + "%"; status.textContent = label || ("Processing " + done + " of " + total + "…"); });
+    }, (done, total, label) => { barFill.style.width = (total ? done / total * 100 : 100) + "%"; status.textContent = label || ("Processing " + done + " of " + total + "…"); }, null, "Roster upload");
     errors.forEach(e => { if (e.item && e.item.rec) e.item = e.item.rec; });
 
     const updated = p.toUpdate.length, created = p.toCreate.length, inactivated = doInactivate ? p.toInactivate.length : 0;
@@ -737,6 +742,7 @@
   }
 
   async function runImport(result, container) {
+    if (DS.job.busy()) return;
     const t = TYPES[state.type];
     const p = state.parsed;
     const listName = t.list();
@@ -757,7 +763,7 @@
       p.usedNameMatch = !!state.useNameMatch && (p.nameWrite || []).length > 0;
       const writes = p.usedNameMatch ? p.toWrite.concat(p.nameWrite) : p.toWrite;
       const createErrors = await runBatched(writes, rec => DS.spCreate(listName, stripMeta(rec)),
-        (d, tot, label) => progress(d, tot, label || "Adding records"));
+        (d, tot, label) => progress(d, tot, label || "Adding records"), null, t.label + " upload");
       const created = writes.length - createErrors.length;
       const byName = p.usedNameMatch ? p.nameWrite.length : 0;
 

@@ -289,7 +289,9 @@
     // Awards — full width below the quadrants (rows not clickable: they hold a button)
     const awardsPill = el("span", { class: "count-pill" });
     const at = smartTable({ key: "dash-awards", rows: awards, countEl: awardsPill, search: searchText,
-      emptyText: "No employees are award-eligible right now.", columns: awardColumns(cache, container, nameSort),
+      emptyText: cache.idx.accidentRecordsStart ? "No employees are award-eligible right now."
+        : "Awards are paused until accident records are uploaded. After that, safe driving counts from the oldest accident in the data.",
+      columns: awardColumns(cache, container, nameSort),
       facets: [{ label: "Milestone", options: distinctOptions(r => r.nextMilestone + "-year"), test: (r, v) => (r.nextMilestone + "-year") === v }] });
     const awardsQuad = quad("Awards eligible", awardsPill, at.body, at.bar);
     awardsQuad.classList.add("dash-wide");
@@ -493,8 +495,11 @@
       body.appendChild(detailRow("Physical", physicalDetailBadge(phys, cache.idx.physLeadDays)));
       body.appendChild(detailRow("Courses", courseDetailBadge(crs, cache.idx.courseLeadDays)));
       body.appendChild(detailRow("Next award",
-        awd.eligible ? DS.badge(awd.nextMilestone + "-year (eligible)", "clear")
-          : el("span", { class: "tnum", text: awd.nextMilestone + "-year · " + DS.fmtDate(awd.eligibleDate) })));
+        awd.paused ? DS.badge("Paused \u2014 no accident records yet", "neutral")
+        : awd.noHire ? DS.badge("No hire date on file", "neutral")
+        : awd.eligible ? DS.badge(awd.nextMilestone + "-year (eligible)", "clear")
+        : el("span", { class: "tnum", title: "Clock started " + DS.fmtDate(awd.clockStart) + " (" + awd.startReason + ")",
+            text: awd.nextMilestone + "-year · " + DS.fmtDate(awd.eligibleDate) })));
 
       // driver designation editor
       const editWrap = el("div", { class: "detail__edit" });
@@ -887,7 +892,7 @@
     matchedTwoPeople: "Two possible people (unsettled)", resolvedByName: "Two possible people (name confirmed)", alreadyInSharePoint: "Already in SharePoint",
     repeatedInFile: "Repeated in file", onlySomeCourses: "Only some required courses",
     noEmployeeNumber: "No employee number", failed: "Failed to save",
-    employees: "Employees in sheet", designationsSet: "Designations set", physicalsAdded: "Physical records added",
+    employees: "Employees in sheet", savesAttempted: "Total saves (progress bar)", designationsSet: "Designations set", physicalsAdded: "Physical records added",
     coursesAdded: "Course records added", alreadyOnFile: "Already on file", notOnRoster: "Not on roster",
     historyRowsUnmatched: "Exam-history rows unmatched",
   };
@@ -931,8 +936,10 @@
         { head: "Type", sort: x => x.type, render: x => DS.badge(x.type || "\u2014", "neutral") },
         { head: "File", sort: x => x.file, render: x => x.file || "\u2014" },
         { head: "By", sort: x => DS.emailLocal(x.by), render: x => DS.emailLocal(x.by) || "\u2014" },
-        { head: "Rows", thClass: "num", tdClass: "num", sort: x => x.counts.rows || x.counts.employees || 0, render: x => String(x.counts.rows != null ? x.counts.rows : (x.counts.employees || "\u2014")) },
-        { head: "Added", thClass: "num", tdClass: "num", sort: x => x.added, render: x => String(x.added) },
+        { head: "In file", tdClass: "nowrap", sort: x => x.counts.rows || x.counts.employees || 0,
+          render: x => x.counts.rows != null ? Number(x.counts.rows).toLocaleString() + " rows"
+            : x.counts.employees != null ? Number(x.counts.employees).toLocaleString() + " employees" : "\u2014" },
+        { head: "Records added", thClass: "num", tdClass: "num", sort: x => x.added, render: x => Number(x.added).toLocaleString() },
         { head: "Health", sort: x => x.review, dir: -1,
           render: x => x.review ? DS.badge(x.review + " to review", "overdue") : DS.badge("Clean", "clear") },
       ],

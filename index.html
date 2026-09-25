@@ -521,6 +521,7 @@ const LISTS = {
   audit:     "DrivingSafety_AuditLog",
   tickets:   "DrivingSafety_Tickets",
   config:    "DrivingSafety_Config",
+  uploads:   "DrivingSafety_UploadLog",   // upload health log (Audit log → Upload results)
 };
 
 /* ============================================================
@@ -841,6 +842,12 @@ DS.inspectList = async function (listName) {
   const first = await DS.spGet(listName, { top: 1 });
   console.log("First item (real keys/values):", first[0] || "(list is empty)");
   return fields;
+};
+
+/* Does a column exist on a list? (Used to skip writing a column the team hasn't added yet.) */
+DS.spFieldExists = async function (listName, field) {
+  try { await spFetch(listUrl(listName) + "/fields/getbyinternalnameortitle('" + encodeURIComponent(field) + "')?$select=InternalName"); return true; }
+  catch (e) { return false; }
 };
 
 /* Audit log convenience — every mutating screen calls this. */

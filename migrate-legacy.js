@@ -93,14 +93,17 @@
     const header = (rows[0] || []).map(h => String(h).trim().toLowerCase());
     const ci = name => header.indexOf(name);
     const iLast = ci("last name"), iFirst = ci("first name"), iEmp = ci("emp#"),
-          iPhys = ci("driver physical date"), iDD = ci("defensive driving date"), iFuture = ci("future verified");
+          iPhys = ci("driver physical date"), iDD = ci("defensive driving date"), iFuture = ci("future verified"),
+          iBadge = ci("badge");
     if (iEmp < 0) throw new Error("Couldn't find an 'Emp#' column — is this the Safety Team Main spreadsheet?");
     const out = [];
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i]; if (!row || !row[iEmp]) continue;
       out.push({
         employeeId: String(row[iEmp]).trim(),
+        badge: iBadge >= 0 ? String(row[iBadge] == null ? "" : row[iBadge]).trim() : "",
         name: [row[iLast], row[iFirst]].filter(Boolean).join(", "),
+        row: i + 1,
         physicalRaw: row[iPhys], ddRaw: row[iDD],
         futureNote: iFuture >= 0 ? row[iFuture] : null,
       });
@@ -169,25 +172,33 @@
   /* ---------------- reconciliation ---------------- */
   function reconcile(cache, statusRows, history, pendingRows) {
     const nameIdx = buildNameIndex(cache);
+    const ix = cache.idx.ids, K = DS.util.empKey;
     const historyByEmp = {}; let unmatchedHistory = 0;
     history.forEach(h => {
-      let emp = h.employeeId;
-      if (!emp && h.nameHint) {
-        const m = matchByName(nameIdx, h.nameHint.last, h.nameHint.first);
-        if (m) emp = String(m.EmployeeId).trim();
-      }
-      if (!emp) { unmatchedHistory++; return; }
-      (historyByEmp[emp] = historyByEmp[emp] || []).push(h);
+      let rec = null;
+      if (h.employeeId) rec = DS.ids.resolve(ix, h.employeeId, null).rec;          // Employee #, then badge
+      else if (h.nameHint) rec = matchByName(nameIdx, h.nameHint.last, h.nameHint.first);   // New Hires: name only
+      if (!rec) { unmatchedHistory++; return; }
+      const k = K(rec.EmployeeId);
+      (historyByEmp[k] = historyByEmp[k] || []).push(h);
     });
     const pendingByEmp = {};
-    pendingRows.forEach(p => (pendingByEmp[p.employeeId] = pendingByEmp[p.employeeId] || []).push(p));
+    pendingRows.forEach(p => {
+      const rec = DS.ids.resolve(ix, p.employeeId, null).rec;
+      if (!rec) { unmatchedHistory++; return; }
+      const k = K(rec.EmployeeId);
+      (pendingByEmp[k] = pendingByEmp[k] || []).push(p);
+    });
 
     const plan = [];
     statusRows.forEach(sr => {
-      const roster = cache.idx.rosterByEmp[sr.employeeId];
-      if (!roster) { plan.push({ employeeId: sr.employeeId, name: sr.name, notOnRoster: true }); return; }
+      let res = DS.ids.resolve(ix, sr.employeeId, sr.name);
+      if (!res.rec && sr.badge) res = DS.ids.resolve(ix, sr.badge, sr.name);           // fall back to the sheet's Badge column
+      const roster = res.rec;
+      if (!roster) { plan.push({ employeeId: sr.employeeId, badge: sr.badge, name: sr.name, row: sr.row, notOnRoster: true, suggestions: res.suggestions || [] }); return; }
 
-      const entry = { employeeId: sr.employeeId, name: roster.Title || sr.name, flags: [] };
+      const entry = { employeeId: String(roster.EmployeeId).trim(), sourceId: sr.employeeId, row: sr.row, name: roster.Title || sr.name, flags: [] };
+      if (res.conflict) entry.conflict = { chosen: roster, other: res.other, byName: res.byName, method: res.method };
       entry.currentDesignation = DS.util.designation(roster);
       entry.designationLocked = entry.currentDesignation !== "Primary";
       entry.rawDesignation = String(roster.DriverStatus || "").trim();
@@ -207,7 +218,7 @@
       entry.suggestedDesignation = suggested;
 
       // full exam history — every exam becomes its own record (employee log)
-      entry.exams = examsFor(historyByEmp[sr.employeeId], pendingByEmp[sr.employeeId]);
+      entry.exams = examsFor(historyByEmp[K(roster.EmployeeId)], pendingByEmp[K(roster.EmployeeId)]);
 
       // defensive driving due date
       const dDate = plausibleDate(sr.ddRaw);
@@ -227,18 +238,38 @@
 
     // Employees with exam history who aren't in Safety Team Main: log their
     // history too (no designation change for them).
-    const inStatus = new Set(statusRows.map(sr => sr.employeeId));
+    const inStatus = new Set(plan.filter(e => !e.notOnRoster).map(e => K(e.employeeId)));
     Object.keys(historyByEmp).concat(Object.keys(pendingByEmp)).forEach(emp => {
       if (inStatus.has(emp)) return;
       inStatus.add(emp);
       const roster = cache.idx.rosterByEmp[emp];
       if (!roster) return;
-      plan.push({ employeeId: emp, name: roster.Title || emp, flags: [], historyOnly: true,
+      plan.push({ employeeId: String(roster.EmployeeId).trim(), name: roster.Title || emp, flags: [], historyOnly: true,
         currentDesignation: DS.util.designation(roster), rawDesignation: String(roster.DriverStatus || "").trim(),
         designationLocked: true, suggestedDesignation: null, exams: examsFor(historyByEmp[emp], pendingByEmp[emp]) });
     });
 
     return { plan, unmatchedHistory };
+  }
+
+  // Rows from Julie's sheet that couldn't be applied cleanly — for the Upload results log
+  function migrationProblems(plan, errors) {
+    const out = [];
+    (errors || []).forEach(e => {
+      const f = (e.item && e.item.fields) || {};
+      out.push({ why: "Failed to save", row: "", id: String(f.EmployeeId || ""), name: f.Title || "",
+        info: String((e.item && e.item.list) || "").replace("DrivingSafety_", ""), note: e.message || String(e) });
+    });
+    plan.forEach(e => {
+      if (e.notOnRoster) out.push({ why: "No match on roster", row: e.row || "", id: e.employeeId + (e.badge ? " / badge " + e.badge : ""),
+        name: e.name || "", info: "Safety Team Main",
+        note: e.suggestions && e.suggestions.length ? "Possible: " + e.suggestions.map(x => (x.Title || "?") + " (#" + x.EmployeeId + ")").join("; ") : "Likely a former employee" });
+      else if (e.conflict) out.push({ why: e.conflict.byName ? "Two possible people (name confirmed)" : "Two possible people", row: e.row || "", id: e.sourceId, name: e.name, info: "Safety Team Main",
+        note: "Saved to " + (e.conflict.chosen.Title || "?") + " (#" + e.conflict.chosen.EmployeeId + "); the same number is " +
+          (e.conflict.other.Title || "?") + "'s " + (e.conflict.method === "badge" ? "employee #" : "badge") +
+          (e.conflict.byName ? " \u2014 the name agrees with the choice." : " \u2014 the name didn't settle it.") });
+    });
+    return out;
   }
 
   function examsFor(hist, pending) {
@@ -272,20 +303,21 @@
 
     const physKeys = new Set(), masterPhysKeys = new Set(), courseKeys = new Set();
     (await DS.spGet(L.physicals, { select: ["EmployeeId", "PhysicalDate", "ExpirationDate", "Source"] })).forEach(p => {
-      const emp = String(p.EmployeeId || "").trim();
+      const emp = DS.util.empKey(p.EmployeeId);
       if (p.PhysicalDate) physKeys.add(emp + "|" + DS.isoDate(p.PhysicalDate));
       if (DS.util.isFallbackSource(p) && p.ExpirationDate) masterPhysKeys.add(emp + "|" + DS.isoDate(p.ExpirationDate));
     });
     (await DS.spGet(L.courses, { select: ["EmployeeId", "CourseTitle", "DateCompleted"] })).forEach(c => {
-      courseKeys.add(String(c.EmployeeId || "").trim() + "|" + String(c.CourseTitle || "").trim() + "|" + DS.isoDate(c.DateCompleted));
+      courseKeys.add(DS.util.empKey(c.EmployeeId) + "|" + String(c.CourseTitle || "").trim() + "|" + DS.isoDate(c.DateCompleted));
     });
 
     const ops = [];
     let skipped = 0;
     plan.forEach(entry => {
       if (entry.notOnRoster) return;
-      const emp = entry.employeeId;
-      const roster = cache.idx.rosterByEmp[emp];
+      const emp = entry.employeeId;                     // the roster's Employee # (what records are saved under)
+      const ek = DS.util.empKey(emp);                   // comparison key (no leading zeros)
+      const roster = cache.idx.rosterByEmp[ek];
       const name = (roster && roster.Title) || entry.name || "";
       const res = resolutions[emp];
       const desigToApply = entry.designationLocked ? null : (res && res.designation !== undefined ? res.designation : entry.suggestedDesignation);
@@ -293,7 +325,7 @@
         ops.push({ list: L.roster, kind: "update", id: roster.Id, fields: { DriverStatus: desigToApply } });
 
       (entry.exams || []).forEach(x => {
-        const k = emp + "|" + x.testDate;
+        const k = ek + "|" + x.testDate;
         if (physKeys.has(k)) { skipped++; return; }
         physKeys.add(k);
         const f = { Title: name, EmployeeId: emp, PhysicalDate: x.testDate, Result: x.result, Source: "Legacy History" };
@@ -302,7 +334,7 @@
       });
 
       if (entry.physicalDueDate) {
-        const k = emp + "|" + entry.physicalDueDate;
+        const k = ek + "|" + entry.physicalDueDate;
         if (masterPhysKeys.has(k)) skipped++;
         else {
           masterPhysKeys.add(k);
@@ -313,7 +345,7 @@
       if (entry.courseDueDate) {
         const est = DS.isoDate(DS.util.addYears(DS.parseDate(entry.courseDueDate), -renewalYears));
         requiredTitles.forEach(title => {
-          const k = emp + "|" + title + "|" + est;
+          const k = ek + "|" + title + "|" + est;
           if (courseKeys.has(k)) { skipped++; return; }
           courseKeys.add(k);
           ops.push({ list: L.courses, kind: "create", fields: { Title: name, EmployeeId: emp, CourseTitle: title,
@@ -376,6 +408,7 @@
 
     const resultWrap = el("div", { id: "migrateResult" });
     container.appendChild(resultWrap);
+    container.appendChild(renderCourseMatchCheck());
     container.appendChild(renderDesignationReset());
     container.appendChild(renderMaintenance());
 
@@ -387,6 +420,94 @@
      For redoing a bad import cleanly (e.g. the first course upload, whose dates
      were affected by the time-zone bug). Removes ONLY records tagged with the
      chosen source, in the chosen list. */
+  /* ---------------- Diagnose: do course records match the roster? ----------------
+     Course records are linked to people ONLY by EmployeeId. This compares every
+     course record's ID with the roster's Employee IDs, by source, and reports
+     exact matches, near-matches (differ only by leading zeros/formatting), and
+     no match — with ID-length patterns (e.g. badge numbers vs employee numbers). */
+  function renderCourseMatchCheck() {
+    const runBtn = el("button", { class: "btn btn--ghost", type: "button", text: "Run check" });
+    const out = el("div", { style: "margin-top:12px" });
+    const lookIn = el("input", { class: "field", type: "text", placeholder: "Look up an ID or badge from a file", style: "max-width:280px" });
+    const lookBtn = el("button", { class: "btn btn--ghost", type: "button", text: "Look up" });
+    const lookOut = el("div", { style: "margin-top:8px" });
+    let data = null;
+    const K = v => DS.util.empKey(v);
+    const lengths = ids => {
+      const c = {};
+      ids.forEach(id => { const n = String(id).replace(/^0+/, "").length; c[n] = (c[n] || 0) + 1; });
+      return Object.keys(c).sort((a, b) => c[b] - c[a]).slice(0, 4).map(n => n + " characters: " + c[n]).join(", ");
+    };
+    async function load(force) {
+      if (data && !force) return data;
+      const cache = await DS.data.load(true);
+      data = { cache, ix: cache.idx.ids, courses: cache.courses };
+      return data;
+    }
+
+    runBtn.addEventListener("click", async () => {
+      out.innerHTML = ""; out.appendChild(el("div", { class: "help", text: "Loading roster and course records\u2026" }));
+      try {
+        const { cache, ix, courses } = await load(true);
+        out.innerHTML = "";
+        const withBadge = cache.roster.filter(r => String(r.Badge || "").trim()).length;
+        out.appendChild(el("div", { class: "help", text: cache.roster.length + " roster records \u00b7 " + withBadge + " have a badge number on file" +
+          (withBadge ? "" : " \u2014 upload the roster report with the Badge column so badge IDs can be matched") }));
+        const bySource = {};
+        courses.forEach(c => { const src = c.Source || "(no source)"; (bySource[src] = bySource[src] || []).push(c); });
+        const rows = [], notes = [];
+        Object.keys(bySource).sort().forEach(src => {
+          const recs = bySource[src];
+          let linked = 0, byBadge = 0, none = 0;
+          const miss = new Set(), badgeIds = new Set();
+          recs.forEach(c => {
+            if (cache.idx.rosterByEmp[K(c.EmployeeId)]) { linked++; return; }           // shows in the app now
+            const res = DS.ids.resolve(ix, c.EmployeeId, null);
+            if (res.rec) { byBadge++; badgeIds.add(String(c.EmployeeId)); } else { none++; miss.add(String(c.EmployeeId)); }
+          });
+          rows.push(el("tr", null, [src, recs.length, linked, byBadge, none].map((v, k) => el("td", { class: k ? "num" : "strong", text: String(v) }))));
+          if (byBadge) notes.push(el("div", { class: "import-note warn", style: "margin-top:10px", text: src + ": " + byBadge +
+            " record(s) are saved under a badge number, so they don't show on anyone's record yet. Re-importing this file fixes them (the upload now saves every record under the Employee #)." }));
+          if (none) notes.push(el("div", { class: "import-note warn", style: "margin-top:10px", text: src + ": " + none +
+            " record(s) match no one by Employee # or badge. ID lengths \u2192 " + lengths(Array.from(miss)) +
+            ". Examples: " + Array.from(miss).slice(0, 20).join(", ") + (miss.size > 20 ? ", \u2026" : "") }));
+        });
+        out.appendChild(el("div", { style: "overflow-x:auto" }, el("table", { class: "tbl", style: "margin-top:8px" }, [
+          el("thead", null, el("tr", null, ["Source", "Records", "Linked to an employee", "Match only by badge", "No match"].map(h => el("th", { text: h })))),
+          el("tbody", null, rows),
+        ])));
+        notes.forEach(n => out.appendChild(n));
+      } catch (e) { out.innerHTML = ""; out.appendChild(el("div", { class: "import-note warn", text: "Couldn't run the check: " + e.message })); }
+    });
+
+    lookBtn.addEventListener("click", async () => {
+      const id = String(lookIn.value || "").trim(); if (!id) return;
+      lookOut.innerHTML = ""; lookOut.appendChild(el("div", { class: "help", text: "Looking up\u2026" }));
+      try {
+        const { ix, courses } = await load(false);
+        const res = DS.ids.resolve(ix, id, null);
+        const recs = courses.filter(c => K(c.EmployeeId) === K(id) || (res.rec && K(c.EmployeeId) === K(res.rec.EmployeeId)));
+        lookOut.innerHTML = "";
+        lookOut.appendChild(el("div", { class: "help", text:
+          "Roster: " + (res.rec ? (res.rec.Title || "(no name)") + " \u2014 Employee #" + res.rec.EmployeeId + (res.rec.Badge ? ", badge " + res.rec.Badge : "") +
+            " (matched by " + (res.method === "badge" ? "badge" : "employee #") + ")" + (res.conflict ? " \u2014 note: this number is also " + (res.other.Title || "?") + "'s " + (res.method === "badge" ? "employee #" : "badge") : "")
+            : "no employee with this Employee # or badge") +
+          " \u00b7 Course records: " + recs.length +
+          (recs.length ? " (" + recs.slice(0, 6).map(c => (c.Source || "?") + ": " + (c.CourseTitle || "?") + " " + DS.fmtDate(c.DateCompleted) + " [saved as " + c.EmployeeId + "]").join("; ") + (recs.length > 6 ? "; \u2026" : "") + ")" : "") }));
+      } catch (e) { lookOut.innerHTML = ""; lookOut.appendChild(el("div", { class: "help", text: "Couldn't look up: " + e.message })); }
+    });
+
+    return el("div", { class: "card", style: "margin-top:28px" }, [
+      el("div", { class: "card__head" }, el("h3", { text: "Diagnose \u2014 are course records linked to employees?" })),
+      el("div", { class: "card__body" }, [
+        el("div", { class: "import-note", text: "Checks every course record against the roster (Employee #, then badge). It only reads \u2014 nothing is changed." }),
+        runBtn, out,
+        el("div", { style: "display:flex; gap:8px; align-items:center; margin-top:16px; flex-wrap:wrap" }, [lookIn, lookBtn]),
+        lookOut,
+      ]),
+    ]);
+  }
+
   /* ---------------- One-time: clear auto-assigned "Primary" ----------------
      The first roster import stamped everyone "Primary". This clears that
      automatic value so the master sheet (via this tool) and Julie can assign
@@ -621,6 +742,18 @@
             ? result.errors.length + " operation(s) failed — grouped below. Re-running is safe; it only fills in what's missing."
             : "All written. Safe to re-run later as more files come in — already-set designations won't be touched.") }));
         if (result.errors.length) body.appendChild(DS.errorSummaryEl(result.errors));
+        const probs = migrationProblems(plan, result.errors);
+        const logged = DS.logUpload ? await DS.logUpload({ type: "Migration",
+          file: "Safety Team Main" + (state.history ? " + exam history" : ""), problems: probs, counts: {
+            employees: plan.filter(e => !e.notOnRoster && !e.historyOnly).length, designationsSet: result.rosterN,
+            physicalsAdded: result.physN, coursesAdded: result.courseN, alreadyOnFile: result.skipped,
+            notOnRoster: plan.filter(e => e.notOnRoster).length, historyRowsUnmatched: state.unmatchedHistory || 0,
+            matchedTwoPeople: plan.filter(e => e.conflict && !e.conflict.byName).length,
+            resolvedByName: plan.filter(e => e.conflict && e.conflict.byName).length, failed: result.errors.length } }) : false;
+        body.appendChild(el("div", { class: "help", style: "margin-top:6px", text: logged
+          ? "Saved to Audit log \u2192 Upload results."
+          : "Couldn't save to Upload results \u2014 create the DrivingSafety_UploadLog list." }));
+        if (probs.length && DS.problemsDetails) body.appendChild(DS.problemsDetails(probs, "Migration", true));
         wrap.appendChild(el("div", { class: "card" }, body));
         DS.toast("Migration applied.", result.errors.length ? "error" : "success");
       } catch (e) {

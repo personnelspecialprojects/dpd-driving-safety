@@ -250,6 +250,17 @@
     });
     idx.physInEffect = idx.physLatest;
 
+    /* Awards need PROOF of safe driving, not just an absence of accidents on file.
+       Accident records are only trusted from this date forward: the Admin setting
+       "Accident records complete from" (Config.AccidentRecordsStartDate), or — if
+       that's blank — the oldest accident on file. No accident records at all means
+       no one is award-eligible. */
+    const cfgStart = DS.parseDate(config.AccidentRecordsStartDate);
+    let earliestAccident = null;
+    cache.accidents.forEach(a => { const d = DS.parseDate(a.AccidentDate); if (d && (!earliestAccident || d < earliestAccident)) earliestAccident = d; });
+    idx.accidentRecordsStart = cfgStart || earliestAccident || null;
+    idx.accidentRecordsSource = cfgStart ? "setting" : earliestAccident ? "oldest accident on file" : null;
+
     const ptsCutoff = addMonths(startOfToday(), -idx.pointRolloffMonths);
     idx.ptsCutoff = ptsCutoff;
     cache.accidents.forEach(a => {
@@ -357,14 +368,33 @@
     },
 
     /* Award: next milestone + the date it's reached. */
+    /* The award clock starts at the LATEST of: hire date, the date accident records
+       are complete from, and the last streak-resetting accident. Milestones count
+       from there. No accident records → paused; no hire date → not eligible. */
     awardFor(cache, emp) {
       const hire = DS.parseDate((cache.idx.rosterByEmp[emp] || {}).HireDate);
-      const reset = cache.idx.qualResetDate[emp] || hire;
       const highest = cache.idx.highestAward[emp] || 0;
       const next = highest + cache.idx.awardMilestoneYears;
-      const eligibleDate = reset ? addYears(reset, next) : null;
-      const eligible = !!eligibleDate && eligibleDate <= startOfToday();
-      return { nextMilestone: next, highest, resetDate: reset, eligibleDate, eligible };
+      const records = cache.idx.accidentRecordsStart;
+      if (!records) return { nextMilestone: next, highest, eligibleDate: null, eligible: false, paused: true };
+      if (!hire) return { nextMilestone: next, highest, eligibleDate: null, eligible: false, noHire: true };
+      const reset = cache.idx.qualResetDate[emp] || null;
+      let start = hire, startReason = "hire date";
+      if (records > start) { start = records; startReason = "accident records start"; }
+      if (reset && reset > start) { start = reset; startReason = "last accident"; }
+      // Full years of confirmed safe driving (all three conditions met) as of today
+      const today = startOfToday(), step = cache.idx.awardMilestoneYears;
+      let years = today.getFullYear() - start.getFullYear();
+      if (addYears(start, years) > today) years--;
+      // Highest milestone fully earned (a multiple of the interval, e.g. 5/10/15)
+      const achieved = step > 0 ? Math.floor(Math.max(0, years) / step) * step : 0;
+      if (achieved >= step && achieved > highest) {
+        return { nextMilestone: achieved, highest, resetDate: start, clockStart: start, startReason,
+                 eligibleDate: addYears(start, achieved), eligible: true, safeYears: years };
+      }
+      const upcoming = Math.max(highest, achieved) + step;          // next level not yet reached
+      return { nextMilestone: upcoming, highest, resetDate: start, clockStart: start, startReason,
+               eligibleDate: addYears(start, upcoming), eligible: false, safeYears: years };
     },
 
     /* ---- Dashboard due-lists (active employees only) ---- */

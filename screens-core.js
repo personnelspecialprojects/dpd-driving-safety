@@ -882,7 +882,7 @@
   }
 
   const COUNT_LABELS = {
-    rows: "Rows in file", added: "Added", updated: "Updated", inactivated: "Marked inactive",
+    rows: "Rows in file", added: "Added", updated: "Updated", inactivated: "Marked inactive", byName: "Matched by name (your choice)",
     byEmployeeNumber: "Matched by employee #", byBadge: "Matched by badge", noMatch: "Matched no one",
     matchedTwoPeople: "Two possible people (unsettled)", resolvedByName: "Two possible people (name confirmed)", alreadyInSharePoint: "Already in SharePoint",
     repeatedInFile: "Repeated in file", onlySomeCourses: "Only some required courses",

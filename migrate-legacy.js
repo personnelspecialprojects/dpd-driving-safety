@@ -360,13 +360,17 @@
     const errors = await DS.runBatched(ops, async op => {
       if (op.kind === "update") await DS.spUpdate(op.list, op.id, op.fields);
       else await DS.spCreate(op.list, op.fields);
-    }, onProgress || (() => {}));
+    }, onProgress || (() => {}), null, "Migration");
 
+    // Report what was actually saved (planned minus failures), per list
+    const failedBy = {};
+    errors.forEach(e => { const l = e.item && e.item.list; failedBy[l] = (failedBy[l] || 0) + 1; });
+    const saved = { rosterN: rosterN - (failedBy[L.roster] || 0), physN: physN - (failedBy[L.physicals] || 0), courseN: courseN - (failedBy[L.courses] || 0) };
     await DS.audit("Legacy migration committed", null, null,
-      rosterN + " designations set, " + physN + " physical records, " + courseN + " course records added, " +
-      skipped + " already on file, " + errors.length + " failed");
+      saved.rosterN + " designations set, " + saved.physN + " physical records, " + saved.courseN + " course records added, " +
+      skipped + " already on file, " + errors.length + " failed (" + ops.length + " saves attempted)");
     DS.data.clear();
-    return { rosterN, physN, courseN, skipped, errors };
+    return Object.assign(saved, { attempted: ops.length, skipped, errors });
   }
 
   /* ---- what each upload's real column headers look like, shown on hover ---- */
@@ -536,6 +540,7 @@
         if (!reset.length) return;
         const go = el("button", { class: "btn", type: "button", text: "Clear " + reset.length + " automatic designations" });
         go.addEventListener("click", async () => {
+          if (DS.job.busy()) return;
           if (!confirm("Clear the automatic \u201CPrimary\u201D designation for " + reset.length + " employees?\n\nThey stay treated as Primary for compliance and appear under \u201CNeeds a designation\u201D until assigned. Running the migration next fills in everyone listed in Julie\u2019s master sheet.")) return;
           go.disabled = true; checkBtn.disabled = true;
           const errors = await DS.runBatched(reset, r => DS.spUpdate(L.roster, r.Id, { DriverStatus: null }), (d, t, label) => {
@@ -590,6 +595,7 @@
         if (!rows.length) return;
         const del = el("button", { class: "btn", type: "button", text: "Remove these " + rows.length + " records" });
         del.addEventListener("click", async () => {
+          if (DS.job.busy()) return;
           if (all) {
             const typed = prompt("This permanently removes ALL " + rows.length + " records in " + listLabel + ".\nThe list and its columns stay. Consider exporting a backup from Reports first.\n\nType DELETE to continue.");
             if (typed !== "DELETE") { DS.toast("Cancelled \u2014 nothing was removed."); return; }
@@ -717,6 +723,7 @@
     };
     refreshCounts();
     commitBtn.addEventListener("click", async () => {
+      if (DS.job.busy()) return;
       commitBtn.disabled = true; commitBtn.textContent = "Applying…";
       // live progress — this run can be several thousand writes and take a while
       const bar = el("div", { class: "progress" }, el("div", { class: "progress__bar" }));
@@ -736,7 +743,7 @@
         });
         wrap.innerHTML = "";
         const body = el("div", { class: "card__body" }, el("div", { class: "import-note" + (result.errors.length ? " warn" : ""), text:
-          "Planned: " + result.rosterN + " designation(s), " + result.physN + " physical record(s), " + result.courseN + " course record(s) added to history; " +
+          "Saved: " + result.rosterN + " designation(s), " + result.physN + " physical record(s), " + result.courseN + " course record(s) added to history (" + result.attempted + " saves in total); " +
           result.skipped + " already on file (skipped). " +
           (result.errors.length
             ? result.errors.length + " operation(s) failed — grouped below. Re-running is safe; it only fills in what's missing."
@@ -745,7 +752,7 @@
         const probs = migrationProblems(plan, result.errors);
         const logged = DS.logUpload ? await DS.logUpload({ type: "Migration",
           file: "Safety Team Main" + (state.history ? " + exam history" : ""), problems: probs, counts: {
-            employees: plan.filter(e => !e.notOnRoster && !e.historyOnly).length, designationsSet: result.rosterN,
+            employees: plan.filter(e => !e.notOnRoster && !e.historyOnly).length, savesAttempted: result.attempted, designationsSet: result.rosterN,
             physicalsAdded: result.physN, coursesAdded: result.courseN, alreadyOnFile: result.skipped,
             notOnRoster: plan.filter(e => e.notOnRoster).length, historyRowsUnmatched: state.unmatchedHistory || 0,
             matchedTwoPeople: plan.filter(e => e.conflict && !e.conflict.byName).length,

@@ -58,6 +58,10 @@
     return m ? Number(m[1]) : 0;
   }
   function num(v) { const n = Number(v); return isNaN(n) ? 0 : n; }
+  // Spreadsheet row number (as shown in Excel) for index i of rowsOf(ws)
+  function rowNo(ws, i) { try { return XLSX.utils.decode_range(ws["!ref"]).s.r + i + 1; } catch (_) { return i + 1; } }
+  // Fields starting with "__" are working data for matching/reporting — never sent to SharePoint
+  function stripMeta(rec) { const o = {}; Object.keys(rec).forEach(k => { if (!k.startsWith("__")) o[k] = rec[k]; }); return o; }
 
   /* ============================================================
      PARSERS — each returns { records:[...], warnings:[...] }
@@ -70,7 +74,7 @@
     if (!loc) throw new Error("Couldn't find the 'Course Title' header — is this the PoliceOne/Lexipol courses export?");
     const ci = colFinder(loc.header);
     const iBadge = ci("Badge/ID #"), iTitle = ci("Course Title"), iStatus = ci("Completion Status"),
-          iDate = ci("Date Completed"), iScore = ci("Score"), iAttempts = ci("Attempts");
+          iDate = ci("Date Completed"), iScore = ci("Score"), iAttempts = ci("Attempts"), iName = ci("Full Name");
     const req = requiredTitles || [];
     const records = []; let skippedStatus = 0, skippedTitle = 0;
     for (let i = loc.headerIdx + 1; i < r.length; i++) {
@@ -87,6 +91,8 @@
         Score: num(row[iScore]),
         Attempts: num(row[iAttempts]),
         Source: "Bulk Upload",
+        __name: iName >= 0 ? String(row[iName] || "").trim() : "",
+        __row: rowNo(ws, i),
       });
     }
     const warnings = [];
@@ -104,6 +110,7 @@
     const iNum = ci("Incident Number"), iLoss = ci("Loss Date"), iEmp = ci("Employee Number"),
           iIRC = ci("IRC Decision"), iFinal = ci("IRC/IAB Final Decision"),
           iStreet = ci("Accident Street1"), iVeh = ci("Vehicle"), iMake = ci("Vehicle Make"), iModel = ci("Vehicle Model");
+    const iName = [ci("Employee Name"), ci("Employee"), ci("Driver Name"), ci("Driver")].find(x => x >= 0);
     const records = [];
     for (let i = loc.headerIdx + 1; i < r.length; i++) {
       const row = r[i]; if (!row || !row[iNum]) continue;
@@ -122,6 +129,8 @@
         Location: String(row[iStreet] || ""),
         Source: "Bulk Upload",
         CountsAgainstStreak: "Auto",
+        __name: iName != null ? String(row[iName] || "").trim() : "",
+        __row: rowNo(ws, i),
       });
     }
     return { records, warnings: [] };
@@ -150,6 +159,7 @@
     // award-clock timing. Note this can differ from actual hire date where
     // service credit (e.g. prior military time) shifts it earlier.
     hireDate: /^(adj(usted)?\s*(svc|service)\s*date|hire\s*date)$/,
+    badge: /^badge\s*(#|number|num|no\.?)?$/,
   };
 
   function parseRoster(wb) {
@@ -168,9 +178,15 @@
     const iWg = findFlexCol(header, ROSTER_PATTERNS.workgroup);
     const iSup = findFlexCol(header, ROSTER_PATTERNS.supervisor);
     const iHire = findFlexCol(header, ROSTER_PATTERNS.hireDate);
-    const records = []; let noHire = 0;
+    const iBadge = findFlexCol(header, ROSTER_PATTERNS.badge);
+    const records = []; let noHire = 0; const noEmp = [];
     for (let i = headerIdx + 1; i < r.length; i++) {
-      const row = r[i]; if (!row || !row[iEmp]) continue;
+      const row = r[i]; if (!row) continue;
+      if (!row[iEmp]) {                                   // a named row with no Employee # can't be imported
+        const nm = [iFirst >= 0 ? row[iFirst] : "", iLast >= 0 ? row[iLast] : ""].join(" ").trim();
+        if (nm) noEmp.push({ __row: rowNo(ws, i), __name: nm, EmployeeId: "", Badge: iBadge >= 0 ? String(row[iBadge] || "").trim() : "" });
+        continue;
+      }
       const first = iFirst >= 0 ? String(row[iFirst] || "").trim() : "";
       const last = iLast >= 0 ? String(row[iLast] || "").trim() : "";
       const hire = iHire >= 0 && row[iHire] ? DS.isoDate(row[iHire]) : null;
@@ -184,12 +200,16 @@
         Supervisor: iSup >= 0 ? String(row[iSup] || "") : "",
         HireDate: hire,
         Rank: iRank >= 0 ? String(row[iRank] || "") : "",
+        __row: rowNo(ws, i),
       });
+      if (iBadge >= 0) records[records.length - 1].Badge = String(row[iBadge] == null ? "" : row[iBadge]).trim();
     }
     const warnings = [];
+    if (iBadge < 0) warnings.push("No 'Badge' column found — badges on the roster won't be updated. Uploads that use badge numbers need them.");
+    if (noEmp.length) warnings.push(noEmp.length + " row(s) have a name but no employee number and were skipped — listed in Upload results.");
     if (iHire < 0) warnings.push("No hire/service date column found — course due-dates for new hires need it.");
     else if (noHire) warnings.push(noHire + " employee(s) have no hire/service date.");
-    return { records, warnings };
+    return { records, warnings, noEmp, hasBadge: iBadge >= 0 };
   }
 
   function parsePhysicals(wb) {
@@ -199,7 +219,7 @@
     if (!loc) throw new Error("Couldn't find the 'Employee Number' header — is this the driver-physicals export?");
     const ci = colFinder(loc.header);
     const iDate = ci("Date Tested"), iEmp = ci("Employee Number"), iRes = ci("Driver Physical Test Results"),
-          iExp = ci("Phy Exp Date"), iClinic = ci("Clinic Location");
+          iExp = ci("Phy Exp Date"), iClinic = ci("Clinic Location"), iName = ci("Employee");
     const records = []; let noExp = 0, fails = 0;
     for (let i = loc.headerIdx + 1; i < r.length; i++) {
       const row = r[i]; if (!row || !row[iEmp]) continue;
@@ -214,6 +234,8 @@
         Result: result,
         Provider: String(row[iClinic] || ""),
         Source: "Bulk Upload",
+        __name: iName >= 0 ? String(row[iName] || "").trim() : "",
+        __row: rowNo(ws, i),
       });
     }
     const warnings = [];
@@ -238,9 +260,9 @@
     },
     roster: {
       source: "DPD personnel SQL report export",
-      columns: ["Emp#", "FirstName", "LastName", "Rank", "WorkingOrg", "Workgroup", "Supervisor", "AdjSvcDate"],
-      sample: ["123456", "Jordan", "Smith", "Police Officer", "1498", "Patrol", "Garcia, M.", "6/1/2022"],
-      note: 'Column order doesn\'t matter, and common variants (e.g. "Emp #", "Employee Number") are accepted too. Driver designation is never touched by this import.',
+      columns: ["Emp#", "Badge", "FirstName", "LastName", "Rank", "WorkingOrg", "Workgroup", "Supervisor", "AdjSvcDate"],
+      sample: ["123456", "8812", "Jordan", "Smith", "Police Officer", "1498", "Patrol", "Garcia, M.", "6/1/2022"],
+      note: 'Column order doesn\'t matter, and common variants (e.g. "Emp #", "Employee Number") are accepted. Badge may be blank or start with R/T. Driver designation is never touched by this import.',
     },
     physicals: {
       source: 'Driver physicals report (sheet "Data")',
@@ -258,16 +280,18 @@
       label: "Courses", list: () => DS.LISTS.courses, mode: "append-dedup",
       parse: (wb, ctx) => parseCourses(wb, ctx.requiredTitles),
       cols: [["Employee", "EmployeeId"], ["Course", "CourseTitle"], ["Completed", "DateCompleted"], ["Score", "Score"]],
-      dedupKey: r => [r.EmployeeId, r.CourseTitle, r.DateCompleted].join("|"),
+      describe: r => (r.CourseTitle || "?") + " \u00b7 " + DS.fmtDate(r.DateCompleted),
+      dedupKey: r => [DS.util.empKey(r.EmployeeId), String(r.CourseTitle || "").trim(), DS.isoDate(r.DateCompleted)].join("|"),
       existingKeys: async () => {
         const rows = await DS.spGet(DS.LISTS.courses, { select: ["EmployeeId", "CourseTitle", "DateCompleted"] });
-        return new Set(rows.map(x => [String(x.EmployeeId || "").trim(), String(x.CourseTitle || "").trim(), DS.isoDate(x.DateCompleted)].join("|")));
+        return new Set(rows.map(x => [DS.util.empKey(x.EmployeeId), String(x.CourseTitle || "").trim(), DS.isoDate(x.DateCompleted)].join("|")));
       },
     },
     accidents: {
       label: "Accidents", list: () => DS.LISTS.accidents, mode: "append-dedup",
       parse: (wb) => parseAccidents(wb),
       cols: [["Incident #", "IncidentNumber"], ["Employee", "EmployeeId"], ["Date", "AccidentDate"], ["Final pts", "FinalPoints"]],
+      describe: r => "Incident " + (r.IncidentNumber || "?") + " \u00b7 " + DS.fmtDate(r.AccidentDate),
       dedupKey: r => String(r.IncidentNumber).trim(),
       existingKeys: async () => {
         const rows = await DS.spGet(DS.LISTS.accidents, { select: ["IncidentNumber"] });
@@ -277,17 +301,19 @@
     roster: {
       label: "Roster", list: () => DS.LISTS.roster, mode: "upsert",
       parse: (wb) => parseRoster(wb),
-      cols: [["Name", "Title"], ["ID", "EmployeeId"], ["Division", "Division"], ["Rank", "Rank"]],
+      describe: r => r.Title || "",
+      cols: [["Name", "Title"], ["ID", "EmployeeId"], ["Badge", "Badge"], ["Division", "Division"], ["Rank", "Rank"]],
     },
     physicals: {
       label: "Physicals", list: () => DS.LISTS.physicals, mode: "append-dedup",
       parse: (wb) => parsePhysicals(wb),
       cols: [["Employee", "EmployeeId"], ["Tested", "PhysicalDate"], ["Expires", "ExpirationDate"], ["Result", "Result"]],
       // one exam per employee per test date — the same exam from any source isn't logged twice
-      dedupKey: r => [String(r.EmployeeId).trim(), DS.isoDate(r.PhysicalDate)].join("|"),
+      describe: r => "Tested " + DS.fmtDate(r.PhysicalDate) + (r.Result ? " \u00b7 " + r.Result : ""),
+      dedupKey: r => [DS.util.empKey(r.EmployeeId), DS.isoDate(r.PhysicalDate)].join("|"),
       existingKeys: async () => {
         const rows = await DS.spGet(DS.LISTS.physicals, { select: ["EmployeeId", "PhysicalDate"] });
-        return new Set(rows.filter(x => x.PhysicalDate).map(x => [String(x.EmployeeId || "").trim(), DS.isoDate(x.PhysicalDate)].join("|")));
+        return new Set(rows.filter(x => x.PhysicalDate).map(x => [DS.util.empKey(x.EmployeeId), DS.isoDate(x.PhysicalDate)].join("|")));
       },
     },
   };
@@ -324,6 +350,7 @@
             queue.push(entry);   // back of the line, not counted as done yet
             continue;
           }
+          if (e && typeof e === "object") e.item = entry.item;
           errors.push(e);
         }
         done++; onProgress(done, items.length);
@@ -399,37 +426,60 @@
       const XLSXlib = await ensureXlsx();
       const buf = await file.arrayBuffer();
       const wb = XLSXlib.read(buf, { type: "array", cellDates: true });
-      const { records, warnings } = t.parse(wb, state.ctx);
+      const parsed = t.parse(wb, state.ctx);
+      const records = parsed.records, warnings = parsed.warnings || [];
       if (!records.length) { renderMsg(result, "No records found in that file. Check that it's the right export.", "warn"); return; }
+      const key = v => DS.util.empKey(v);
 
       if (t.mode === "upsert") {
         DS.showLoading(result, "Comparing with the current roster…");
         const existing = await DS.spGet(DS.LISTS.roster, { select: ["Id", "EmployeeId"] });
+        if (parsed.hasBadge && !(await DS.spFieldExists(DS.LISTS.roster, "Badge"))) {
+          records.forEach(r => { delete r.Badge; });
+          warnings.push("This file has badge numbers, but DrivingSafety_Roster has no 'Badge' column yet. Add it (Single line of text) and upload again so badges are stored.");
+        }
         const existingMap = {};
-        existing.forEach(e => { const k = String(e.EmployeeId || "").trim(); if (k) existingMap[k] = e; });
-        const fileIds = new Set(records.map(r => String(r.EmployeeId).trim()));
-        const toUpdate = [], toCreate = [];
-        records.forEach(r => {
-          const k = String(r.EmployeeId).trim();
-          if (existingMap[k]) toUpdate.push({ id: existingMap[k].Id, fields: r });
-          else toCreate.push(r);
+        existing.forEach(e => { const k = key(e.EmployeeId); if (k) existingMap[k] = e; });
+        const seen = new Map(), dupRows = [];
+        const unique = records.filter(r => {
+          const k = key(r.EmployeeId);
+          if (seen.has(k)) { dupRows.push({ row: r, first: seen.get(k) }); return false; }
+          seen.set(k, r); return true;
         });
-        const toInactivate = existing.filter(e => { const k = String(e.EmployeeId || "").trim(); return k && !fileIds.has(k); });
-        state.parsed = { mode: "upsert", records, toUpdate, toCreate, toInactivate, warnings, fileName: file.name };
+        if (dupRows.length) warnings.push(dupRows.length + " employee number(s) appear more than once in the file \u2014 the first row for each is used.");
+        const fileIds = new Set(unique.map(r => key(r.EmployeeId)));
+        const toUpdate = [], toCreate = [];
+        unique.forEach(r => { const ex = existingMap[key(r.EmployeeId)]; if (ex) toUpdate.push({ id: ex.Id, fields: r }); else toCreate.push(r); });
+        const toInactivate = existing.filter(e => { const k = key(e.EmployeeId); return k && !fileIds.has(k); });
+        state.parsed = { mode: "upsert", records, toUpdate, toCreate, toInactivate, warnings, fileName: file.name, noEmp: parsed.noEmp || [], dupRows };
         renderPreview(result, container);
         return;
       }
 
-      // dedup preview
-      let toWrite = records, dupCount = 0;
+      // Match every row to a person: Employee # first, then badge.
+      DS.showLoading(result, "Matching rows to the roster…");
+      const cache = await DS.data.load();
+      const ix = cache.idx.ids;
+      const match = { employee: 0, badge: 0 }, unmatched = [], conflicts = [], matched = [];
+      records.forEach(r => {
+        const res = DS.ids.resolve(ix, r.EmployeeId, r.__name);
+        r.__sourceId = String(r.EmployeeId == null ? "" : r.EmployeeId).trim();
+        if (!res.rec) { unmatched.push({ row: r, suggestions: res.suggestions || [] }); return; }
+        match[res.method]++;
+        r.__method = res.method;
+        if (res.conflict) conflicts.push({ row: r, chosen: res.rec, other: res.other, byName: res.byName });
+        r.EmployeeId = String(res.rec.EmployeeId).trim();   // always saved under the roster's Employee #
+        r.Title = res.rec.Title || "";
+        matched.push(r);
+      });
+
+      let toWrite = matched, dupCount = 0;
       const onFileDups = [], inFileDups = [];
       if (t.mode === "append-dedup" && t.existingKeys) {
         DS.showLoading(result, "Checking for existing records…");
         const existing = await t.existingKeys();
-        // Two different reasons a row is skipped — tracked separately so the
-        // preview can say which, and list the exact rows.
         const seen = new Map();
-        toWrite = records.filter(r => {
+        toWrite = matched.filter(r => {
           const k = t.dedupKey(r);
           if (existing.has(k)) { onFileDups.push(r); return false; }
           if (seen.has(k)) { inFileDups.push({ row: r, first: seen.get(k) }); return false; }
@@ -437,7 +487,21 @@
         });
         dupCount = onFileDups.length + inFileDups.length;
       }
-      state.parsed = { records, toWrite, dupCount, onFileDups, inFileDups, warnings, fileName: file.name };
+
+      // Courses: people this file has only some of the required courses for
+      let partial = [];
+      if (state.type === "courses") {
+        const req = state.ctx.requiredTitles || [];
+        const byEmp = {};
+        matched.forEach(r => {
+          const k = key(r.EmployeeId);
+          (byEmp[k] = byEmp[k] || { row: r, titles: new Set() }).titles.add(String(r.CourseTitle || "").trim());
+        });
+        partial = Object.values(byEmp).filter(x => x.titles.size < req.length)
+          .map(x => ({ row: x.row, has: req.filter(tt => x.titles.has(tt)), missing: req.filter(tt => !x.titles.has(tt)) }));
+      }
+
+      state.parsed = { records, toWrite, dupCount, onFileDups, inFileDups, warnings, fileName: file.name, match, unmatched, conflicts, partial };
       renderPreview(result, container);
     } catch (e) {
       renderMsg(result, e.message, "warn");
@@ -479,14 +543,21 @@
         (p.inFileDups || []).length + " repeated within this file (skipped).";
       else summary = "Will add " + p.toWrite.length + " record(s).";
       body.appendChild(el("div", { class: "import-note", text: summary }));
-      const skippedList = skippedDetails(t, p);
-      if (skippedList) body.appendChild(skippedList);
+      if (p.match) {
+        const um = p.unmatched.length, cf = p.conflicts.filter(c => !c.byName).length;
+        body.appendChild(el("div", { class: "import-note" + (um || cf ? " warn" : ""), text:
+          "Matched to the roster: " + p.match.employee + " by employee number \u00b7 " + p.match.badge + " by badge" +
+          (um ? " \u00b7 " + um + " row(s) match no one and will be skipped" : "") +
+          (cf ? " \u00b7 " + cf + " number(s) belong to two people and the name didn't settle it \u2014 check below" : "") + "." }));
+      }
       sample = p.toWrite.slice(0, 8);
       confirmLabel = "Import (" + p.toWrite.length + ")";
       doRun = () => runImport(result, container);
     }
 
     (p.warnings || []).forEach(w => body.appendChild(el("div", { class: "import-note warn", text: w })));
+    const probs = problemRows(t, p);
+    if (probs.length) body.appendChild(problemsDetails(probs, p.fileName));
 
     // preview table
     const cols = t.cols;
@@ -511,36 +582,88 @@
     result.appendChild(el("div", { class: "card" }, [head, body]));
   }
 
-  // Expandable list of every skipped row, so a skip count can be checked
-  // against the source file. In-file repeats are shown beside the row they repeat.
-  function skippedDetails(t, p) {
-    const on = p.onFileDups || [], dup = p.inFileDups || [];
-    if (!on.length && !dup.length) return null;
-    const fmt = (r, c) => { let v = r[c[1]]; if (/date/i.test(c[1])) v = DS.fmtDate(v); return v == null || v === "" ? "\u2014" : String(v); };
-    const head = el("tr", null, [el("th", { text: "Why skipped" })].concat(t.cols.map(c => el("th", { text: c[0] }))));
-    const rows = [];
-    dup.forEach(d => {
-      rows.push(el("tr", null, [el("td", { text: "Repeated in file" })].concat(t.cols.map(c => el("td", { text: fmt(d.row, c) })))));
-      rows.push(el("tr", { style: "color:var(--muted)" }, [el("td", { text: "\u21b3 same as earlier row" })].concat(t.cols.map(c => el("td", { text: fmt(d.first, c) })))));
-    });
-    on.forEach(r => rows.push(el("tr", null, [el("td", { text: "Already in SharePoint" })].concat(t.cols.map(c => el("td", { text: fmt(r, c) }))))));
-    const det = el("details", { style: "margin:4px 0 10px" }, [
-      el("summary", { style: "cursor:pointer; font-size:13px; color:var(--navy-500)", text: "Show the " + (on.length + dup.length) + " skipped row(s)" }),
-      el("div", { style: "overflow-x:auto; margin-top:8px" }, el("table", { class: "tbl" }, [el("thead", null, head), el("tbody", null, rows)])),
+  /* ---------------- Problem rows (preview, result screen, Upload results log) ---------------- */
+  const REVIEW_REASONS = ["No match on roster", "Two possible people", "Failed to save", "No employee number", "Employee # repeated in file"];
+  function problemRows(t, p, failed) {
+    const out = [];
+    const base = r => ({ row: r.__row || "", id: r.__sourceId != null ? r.__sourceId : String(r.EmployeeId || ""),
+      name: r.__name || r.Title || "", info: t && t.describe ? t.describe(r) : "" });
+    (failed || []).forEach(e => { const it = e.item && (e.item.fields || e.item); out.push(Object.assign(it ? base(it) : { row: "", id: "", name: "", info: "" }, { why: "Failed to save", note: e.message || String(e) })); });
+    (p.unmatched || []).forEach(u => out.push(Object.assign(base(u.row), { why: "No match on roster",
+      note: u.suggestions && u.suggestions.length ? "Possible: " + u.suggestions.map(x => (x.Title || "?") + " (#" + x.EmployeeId + (x.Badge ? ", badge " + x.Badge : "") + ")").join("; ") : "No likely match by name" })));
+    (p.conflicts || []).forEach(c => out.push(Object.assign(base(c.row), { why: c.byName ? "Two possible people (name confirmed)" : "Two possible people",
+      note: "Saved to " + (c.chosen.Title || "?") + " (#" + c.chosen.EmployeeId + ", by " + (c.row.__method === "badge" ? "badge" : "employee #") + ")" +
+        (c.byName ? ", which the name in the file agrees with" : ", but the name in the file didn't settle it") +
+        ". The same number is " + (c.other.Title || "?") + "'s " + (c.row.__method === "badge" ? "employee #" : "badge") + "." })));
+    (p.noEmp || []).forEach(r => out.push(Object.assign(base(r), { why: "No employee number", note: r.Badge ? "Badge " + r.Badge : "" })));
+    (p.dupRows || []).forEach(d => out.push(Object.assign(base(d.row), { why: "Employee # repeated in file", note: "Row " + (d.first.__row || "?") + " used instead" })));
+    (p.partial || []).forEach(x => out.push(Object.assign(base(x.row), { why: "Only some required courses", info: "In file: " + (x.has.join(", ") || "none"), note: "Not in file: " + x.missing.join(", ") })));
+    (p.inFileDups || []).forEach(d => out.push(Object.assign(base(d.row), { why: "Repeated in file", note: "Same as row " + (d.first.__row || "?") })));
+    (p.onFileDups || []).forEach(r => out.push(Object.assign(base(r), { why: "Already in SharePoint", note: "" })));
+    return out;
+  }
+
+  // Expandable table of problem rows + Excel download
+  function problemsDetails(probs, fileName, open) {
+    const counts = {};
+    probs.forEach(x => { counts[x.why] = (counts[x.why] || 0) + 1; });
+    const review = probs.filter(x => REVIEW_REASONS.includes(x.why)).length;
+    const summary = Object.keys(counts).map(k => counts[k] + " " + k.toLowerCase()).join(" \u00b7 ");
+    const dl = el("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Download as Excel" });
+    dl.addEventListener("click", e => { e.preventDefault(); downloadProblems(probs, fileName); });
+    const shown = probs.slice(0, 500);
+    const det = el("details", { style: "margin:6px 0 10px" }, [
+      el("summary", { style: "cursor:pointer; font-size:13px; color:" + (review ? "var(--overdue)" : "var(--navy-500)"),
+        text: (review ? review + " row(s) need review \u2014 " : "") + "show details (" + summary + ")" }),
+      el("div", { style: "margin:8px 0" }, dl),
+      el("div", { style: "overflow-x:auto; max-height:380px; overflow-y:auto" }, el("table", { class: "tbl" }, [
+        el("thead", null, el("tr", null, ["Why", "Row", "ID in file", "Name in file", "Details", "Note"].map(h => el("th", { text: h })))),
+        el("tbody", null, shown.map(x => el("tr", null, [x.why, String(x.row || ""), x.id, x.name, x.info, x.note].map(v => el("td", { text: v || "\u2014" }))))),
+      ])),
+      probs.length > shown.length ? el("div", { class: "help", text: "Showing 500 of " + probs.length + " \u2014 download for the full list." }) : null,
     ]);
+    if (open) det.open = true;
     return det;
   }
 
+  async function downloadProblems(probs, fileName) {
+    try {
+      const X = await ensureXlsx();
+      const ws = X.utils.json_to_sheet(probs.map(x => ({ "Why": x.why, "Row in file": x.row, "ID in file": x.id, "Name in file": x.name, "Details": x.info, "Note": x.note })));
+      const wb = X.utils.book_new(); X.utils.book_append_sheet(wb, ws, "Upload problems");
+      X.writeFile(wb, "Upload problems - " + String(fileName || "upload").replace(/\.[^.]+$/, "") + ".xlsx");
+    } catch (e) { DS.toast("Couldn't create the download: " + e.message, "error"); }
+  }
+
+  /* Save one entry to the Upload results log (DrivingSafety_UploadLog).
+     Problem rows are stored as JSON in the Details column (large lists trimmed). */
+  async function logUpload(entry) {
+    const doc = { v: 1, at: new Date().toISOString(),
+      by: (DS.me && (DS.me.mail || DS.me.userPrincipalName)) || "", type: entry.type, file: entry.file,
+      counts: entry.counts || {}, warnings: entry.warnings || [],
+      review: (entry.problems || []).filter(x => REVIEW_REASONS.includes(x.why)).length,
+      problems: (entry.problems || []).slice(0, 800), truncated: (entry.problems || []).length > 800 };
+    let json = JSON.stringify(doc);
+    while (json.length > 60000 && doc.problems.length > 20) {
+      doc.problems = doc.problems.slice(0, Math.floor(doc.problems.length / 2)); doc.truncated = true; json = JSON.stringify(doc);
+    }
+    try { await DS.spCreate(DS.LISTS.uploads, { Title: String(entry.file || entry.type), UploadType: entry.type, Details: json }); return true; }
+    catch (e) { console.warn("Upload results log not saved:", e.message); return false; }
+  }
+  const logNote = ok => ok ? "Saved to Audit log \u2192 Upload results." :
+    "Couldn't save to Upload results \u2014 create the DrivingSafety_UploadLog list (see setup notes).";
+
   async function runUpsert(result, container, doInactivate) {
     const p = state.parsed;
+    const t = TYPES.roster;
     const listName = DS.LISTS.roster;
     const ops = [];
-    // update existing: org fields + reactivate; NEVER DriverStatus → designation preserved
-    p.toUpdate.forEach(u => ops.push({ kind: "update", id: u.id, fields: Object.assign({}, u.fields, { ActiveEmployee: true }) }));
-    // new hires: default designation Primary, active
-    p.toCreate.forEach(r => ops.push({ kind: "create", fields: Object.assign({}, r, { ActiveEmployee: true }) }));   // designation left blank → "Needs a designation" on the Dashboard
+    // update existing: org fields (+ badge) + reactivate; NEVER DriverStatus → designation preserved
+    p.toUpdate.forEach(u => ops.push({ kind: "update", id: u.id, fields: Object.assign(stripMeta(u.fields), { ActiveEmployee: true }), rec: u.fields }));
+    // new hires: designation left blank → "Needs a designation" on the Dashboard
+    p.toCreate.forEach(r => ops.push({ kind: "create", fields: Object.assign(stripMeta(r), { ActiveEmployee: true }), rec: r }));
     // departures: mark inactive (keeps the record + its designation for a possible return)
-    if (doInactivate) p.toInactivate.forEach(e => ops.push({ kind: "update", id: e.Id, fields: { ActiveEmployee: false } }));
+    if (doInactivate) p.toInactivate.forEach(e => ops.push({ kind: "update", id: e.Id, fields: { ActiveEmployee: false }, rec: { EmployeeId: e.EmployeeId } }));
 
     result.innerHTML = "";
     const bar = el("div", { class: "progress" }, el("div", { class: "progress__bar" }));
@@ -554,18 +677,25 @@
       if (op.kind === "create") await DS.spCreate(listName, op.fields);
       else await DS.spUpdate(listName, op.id, op.fields);
     }, (done, total, label) => { barFill.style.width = (total ? done / total * 100 : 100) + "%"; status.textContent = label || ("Processing " + done + " of " + total + "…"); });
+    errors.forEach(e => { if (e.item && e.item.rec) e.item = e.item.rec; });
 
     const updated = p.toUpdate.length, created = p.toCreate.length, inactivated = doInactivate ? p.toInactivate.length : 0;
     await DS.audit("Roster import", listName, null,
       updated + " updated, " + created + " new, " + inactivated + " inactivated; designations preserved");
+    const problems = problemRows(t, p, errors);
+    const logged = await logUpload({ type: "Roster", file: p.fileName, warnings: p.warnings, problems, counts: {
+      rows: p.records.length + (p.noEmp || []).length, updated, added: created, inactivated,
+      noEmployeeNumber: (p.noEmp || []).length, repeatedInFile: (p.dupRows || []).length, failed: errors.length } });
     DS.data.clear();
     const errCount = errors.length;
     renderMsg(result,
-      "Roster processed \u2014 planned: " + updated + " existing updated, " + created + " added, " + inactivated + " marked inactive. " +
+      "Roster processed \u2014 " + updated + " existing updated, " + created + " added, " + inactivated + " marked inactive. " +
       (ops.length - errCount) + " of " + ops.length + " operations succeeded." +
-      (errCount ? " Re-running the same file is safe and will retry only what's needed." : " Designations were preserved."),
+      (errCount ? " Re-running the same file is safe and will retry only what's needed." : " Designations were preserved.") + " " + logNote(logged),
       errCount ? "warn" : "ok");
-    if (errCount) result.querySelector(".card__body").appendChild(errorSummaryEl(errors));
+    const cb = result.querySelector(".card__body");
+    if (errCount) cb.appendChild(errorSummaryEl(errors));
+    if (problems.length) cb.appendChild(problemsDetails(problems, p.fileName));
     DS.toast("Roster update complete.", errCount ? "error" : "success");
     state.parsed = null;
   }
@@ -587,36 +717,37 @@
       status.textContent = label || ("Writing " + done + " of " + total + "…");
     }
 
-    let deleted = 0, deleteErrors = [];
     try {
-      // REPLACE: delete existing first
-      if (t.mode === "replace") {
-        const existing = await DS.spGet(listName, { select: ["Id"] });
-        deleteErrors = await runBatched(existing, item => DS.spDelete(listName, item.Id),
-          (d, tot, label) => progress(d, tot, label || "Clearing old records"));
-        deleted = existing.length - deleteErrors.length;
-      }
-
-      // CREATE
-      const createErrors = await runBatched(p.toWrite, rec => DS.spCreate(listName, rec),
+      const createErrors = await runBatched(p.toWrite, rec => DS.spCreate(listName, stripMeta(rec)),
         (d, tot, label) => progress(d, tot, label || "Adding records"));
       const created = p.toWrite.length - createErrors.length;
 
-      await DS.audit("Bulk import — " + t.label, listName, null,
-        (t.mode === "replace" ? "Replaced roster: " : "Imported: ") +
-        created + " added" + (t.mode === "replace" ? ", " + deleted + " cleared" : "") +
-        (p.dupCount ? ", " + p.dupCount + " duplicates skipped" : ""));
+      await DS.audit("Bulk import \u2014 " + t.label, listName, null,
+        "Imported: " + created + " added" + (p.dupCount ? ", " + p.dupCount + " duplicates skipped" : "") +
+        (p.unmatched && p.unmatched.length ? ", " + p.unmatched.length + " matched no one" : ""));
+
+      const problems = problemRows(t, p, createErrors);
+      const m = p.match || { employee: 0, badge: 0 };
+      const logged = await logUpload({ type: t.label, file: p.fileName, warnings: p.warnings, problems, counts: {
+        rows: p.records.length, added: created, byEmployeeNumber: m.employee, byBadge: m.badge,
+        noMatch: (p.unmatched || []).length, matchedTwoPeople: (p.conflicts || []).filter(c => !c.byName).length,
+        resolvedByName: (p.conflicts || []).filter(c => c.byName).length,
+        alreadyInSharePoint: (p.onFileDups || []).length, repeatedInFile: (p.inFileDups || []).length,
+        onlySomeCourses: (p.partial || []).length, failed: createErrors.length } });
 
       DS.data.clear();  // recompute dashboard/roster off fresh data next visit
 
-      const errCount = createErrors.length + deleteErrors.length;
+      const errCount = createErrors.length;
+      const um = (p.unmatched || []).length;
       renderMsg(result,
         created + " " + t.label.toLowerCase() + " record(s) imported" +
-        (t.mode === "replace" ? " (" + deleted + " old cleared)" : "") +
         (p.dupCount ? ", " + p.dupCount + " skipped as duplicates" : "") +
-        (errCount ? " — " + errCount + " failed (details below)." : "."),
-        errCount ? "warn" : "ok");
-      if (errCount) result.querySelector(".card__body").appendChild(errorSummaryEl(createErrors.concat(deleteErrors)));
+        (um ? ", " + um + " skipped because they match no one on the roster" : "") +
+        (errCount ? " \u2014 " + errCount + " failed." : ".") + " " + logNote(logged),
+        errCount || um ? "warn" : "ok");
+      const cb = result.querySelector(".card__body");
+      if (errCount) cb.appendChild(errorSummaryEl(createErrors));
+      if (problems.length) cb.appendChild(problemsDetails(problems, p.fileName, !!(errCount || um)));
       DS.toast(created + " " + t.label.toLowerCase() + " record(s) imported.", errCount ? "error" : "success");
       state.parsed = null;
     } catch (e) {
@@ -648,5 +779,9 @@
   DS.ensureXlsx = ensureXlsx;   // shared with the reports export
   DS.runBatched = runBatched;   // shared with the legacy migration tool
   DS.errorSummaryEl = errorSummaryEl;
+  DS.logUpload = logUpload;            // migration tool records its runs too
+  DS.problemsDetails = problemsDetails; // Audit log → Upload results
+  DS.downloadProblems = downloadProblems;
+  DS.REVIEW_REASONS = REVIEW_REASONS;
 
 })();

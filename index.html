@@ -808,11 +808,77 @@ function spDates(fields) {
   return out;
 }
 
+/* ---- Fit values to each column's real type ----
+   The lists were built at different times (some in the Power Apps era), so a
+   column's type isn't always what the code assumes. Before every save, look up
+   the list's columns (cached per list) and convert values to what each needs:
+   Person → the SharePoint user's Id; Number/Date/Yes-No → null when blank;
+   Choice → a clear message if the value isn't one of the allowed choices. */
+const fieldCache = {};
+DS.spFields = function (listName) {
+  if (!fieldCache[listName]) {
+    fieldCache[listName] = spFetch(listUrl(listName) + "/fields?$select=InternalName,Title,TypeAsString,Choices,FillInChoice&$filter=Hidden eq false")
+      .then(d => { const m = {}; ((d && d.value) || []).forEach(f => { m[f.InternalName] = f; }); return m; })
+      .catch(e => { delete fieldCache[listName]; throw e; });
+  }
+  return fieldCache[listName];
+};
+const userIdCache = {};
+function ensureUserId(login) {
+  const key = String(login).trim().toLowerCase();
+  if (!userIdCache[key]) {
+    userIdCache[key] = spFetch(CONFIG.siteUrl + "/_api/web/ensureuser", {
+      method: "POST", headers: { "Content-Type": "application/json;odata=nometadata" },
+      body: JSON.stringify({ logonName: key }),
+    }).then(u => u.Id).catch(e => {
+      delete userIdCache[key];
+      const err = new Error("\u201C" + login + "\u201D isn't a person SharePoint recognizes (" + e.message + ")"); err.status = 400; throw err;
+    });
+  }
+  return userIdCache[key];
+}
+async function fitFields(listName, fields) {
+  let meta;
+  try { meta = await DS.spFields(listName); } catch (_) { return fields; }   // can't read columns → send as-is
+  const out = {};
+  for (const k of Object.keys(fields)) {
+    const v = fields[k], f = meta[k];
+    const blank = v == null || v === "";
+    if (!f) { out[k] = v; continue; }
+    const type = f.TypeAsString;
+    if (type === "User" || type === "UserMulti") {
+      const id = blank ? null : await ensureUserId(v);
+      out[k + "Id"] = type === "UserMulti" ? (id ? [id] : []) : id;
+    } else if (type === "Number" || type === "Currency" || type === "Integer") {
+      if (blank) out[k] = null;
+      else {
+        const n = Number(v);
+        if (isNaN(n)) { const err = new Error("The \u201C" + f.Title + "\u201D column only accepts numbers, but got \u201C" + v + "\u201D."); err.status = 400; throw err; }
+        out[k] = n;
+      }
+    } else if (type === "DateTime" || type === "Boolean") {
+      out[k] = blank ? null : v;
+    } else if (type === "Choice") {
+      const choices = f.Choices || [];
+      if (!blank && choices.length && !f.FillInChoice && !choices.includes(v)) {
+        const err = new Error("The \u201C" + f.Title + "\u201D column only allows: " + choices.join(", ") + ". \u201C" + v +
+          "\u201D isn't one of them \u2014 add it as a choice (or turn on \u201CCan add values manually\u201D) in List settings.");
+        err.status = 400; throw err;
+      }
+      out[k] = blank ? null : v;
+    } else if ((type === "Text" || type === "Note") && v != null && typeof v !== "string") {
+      out[k] = String(v);
+    } else out[k] = v;
+  }
+  return out;
+}
+
 DS.spCreate = async function (listName, fields) {
+  const body = await fitFields(listName, spDates(fields));
   return spFetch(listUrl(listName) + "/items", {
     method: "POST",
     headers: { "Content-Type": "application/json;odata=nometadata" },
-    body: JSON.stringify(spDates(fields)),
+    body: JSON.stringify(body),
   });
 };
 
@@ -824,7 +890,7 @@ DS.spUpdate = async function (listName, id, fields) {
       "X-HTTP-Method": "MERGE",
       "IF-MATCH": "*",
     },
-    body: JSON.stringify(spDates(fields)),
+    body: JSON.stringify(await fitFields(listName, spDates(fields))),
   });
 };
 
@@ -1051,5 +1117,6 @@ else window.addEventListener("load", kickoff);
 <script src="imports.js"></script>
 <script src="screens-admin.js"></script>
 <script src="migrate-legacy.js"></script>
+<script src="record-export.js"></script>
 </body>
 </html>

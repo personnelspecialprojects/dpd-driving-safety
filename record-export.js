@@ -22,7 +22,7 @@
     { key: "driving", label: "Driving history", help: "Accidents, points, driving status, safe-driving awards" },
     { key: "courses", label: "Defensive driving course history", help: "Every course completion on file" },
     { key: "physicals", label: "Physical history", help: "Every driver physical on file" },
-    { key: "tickets", label: "Ticket history", help: "Tickets where this employee was the subject" },
+    { key: "tickets", label: "Service ticket history", help: "Requests to the Driving Safety team where this employee was the subject (not traffic citations)" },
   ];
 
   const SOURCE_LABELS = {
@@ -69,10 +69,14 @@
       const drive = DS.compute.drivingStatusFor(cache, emp);
       const awd = DS.compute.awardFor(cache, emp);
       const coverage = cache.idx.accidentRecordsStart;
-      const statusText = drive.status + (drive.override
-        ? " (manual override" + (drive.overrideUntil ? " until " + DS.fmtDate(drive.overrideUntil) : "") +
-          (drive.overrideNote ? ": " + drive.overrideNote : "") + "; points-based status would be " + drive.computed + ")"
-        : "");
+      // Same terms as the app: the designation, plus a restriction only if one applies.
+      let statusText = designation;
+      if (drive.status === "Restrictive" || drive.status === "No-Driving") {
+        statusText += " \u2014 " + drive.status + (drive.override
+          ? " (set by the Driving Safety team" + (drive.overrideUntil ? " until " + DS.fmtDate(drive.overrideUntil) : "") +
+            (drive.overrideNote ? ": " + drive.overrideNote : "") + ")"
+          : " (" + drive.points + " active accident point" + (drive.points === 1 ? "" : "s") + ")");
+      }
       const awards = (cache.awards || []).filter(a => K(a.EmployeeId) === emp).sort(byDateDesc(a => a.AwardDate));
       const nextAward = awd.paused ? "Not available \u2014 accident records have not been loaded"
         : awd.noHire ? "Not available \u2014 no hire date on file"
@@ -93,7 +97,7 @@
         ],
         note: coverage ? "Accidents before " + DS.fmtDate(coverage) + " are not in the program's records, so this history only covers that date forward." : null,
         head: ["Incident #", "Date", "Final points", "Counts", "Status now", "Decision / location"],
-        widths: { 0: 88, 1: 72, 2: 52, 3: 56, 4: 92 },
+        widths: { 0: 88, 1: 72, 2: 62, 3: 52, 4: 92 },
         rows: accidents.map(a => {
           const d = DS.parseDate(a.AccidentDate);
           const counts = String(a.CountsAgainstStreak || "Auto");
@@ -129,11 +133,10 @@
           ["Required courses", cache.idx.requiredTitles.join("; ")],
         ],
         note: hasEst ? "Entries marked \u201Cestimate\u201D come from the program's earlier spreadsheet, which recorded due dates rather than completion dates; the completion date shown is estimated from that due date." : null,
-        head: ["Course", "Completed", "Score", "Source"],
-        widths: { 1: 92, 2: 44, 3: 150 },
+        head: ["Course", "Completed", "Source"],
+        widths: { 1: 110, 2: 180 },
         rows: courses.map(c => [c.CourseTitle || "\u2014",
           (DS.util.isFallbackSource(c) ? "Est. " : "") + fmt(c.DateCompleted),
-          c.Score != null && c.Score !== "" && Number(c.Score) !== 0 ? String(c.Score) : "\u2014",
           srcLabel(c)]),
         emptyText: "No course completions on record.",
       });
@@ -156,10 +159,10 @@
           ["Status", status],
         ],
         note: null,
-        head: ["Date tested", "Result", "Expires / due", "Provider", "Source"],
-        widths: { 0: 76, 1: 58, 2: 80, 4: 160 },
-        rows: phys.map(p => [p.PhysicalDate ? fmt(p.PhysicalDate) : "\u2014", p.Result || "\u2014",
-          fmt(p.ExpirationDate), p.Provider || "\u2014", srcLabel(p)]),
+        head: ["Date tested", "Result", "Expires / due"],
+        widths: { 0: 150, 1: 150 },
+        rows: phys.map(p => [p.PhysicalDate ? fmt(p.PhysicalDate) : "\u2014",
+          p.Result || (p.PhysicalDate ? "\u2014" : "Due date on file"), fmt(p.ExpirationDate)]),
         emptyText: "No physicals on record.",
       });
     }
@@ -169,14 +172,15 @@
       const failed = tickets && tickets.error;
       const mine = failed ? [] : (tickets || []).filter(t => K(t.EmployeeId) === emp).sort(byDateDesc(t => t.OpenedOn || t.Created));
       m.sections.push({
-        key: "tickets", title: "Ticket History",
-        summary: [["Tickets on record", failed ? "Could not be loaded" : String(mine.length)]],
-        note: failed ? "Tickets could not be loaded from SharePoint (" + tickets.error + "). Try the export again." : null,
+        key: "tickets", title: "Service Ticket History",
+        summary: [["Service tickets on record", failed ? "Could not be loaded" : String(mine.length)]],
+        note: failed ? "Service tickets could not be loaded from SharePoint (" + tickets.error + "). Try the export again."
+          : "Service tickets are requests handled by the Driving Safety team. They are not traffic citations.",
         head: ["Opened", "Subject", "Status", "Resolved", "Details"],
         widths: { 0: 72, 1: 130, 2: 58, 3: 72 },
         rows: mine.map(t => [fmt(t.OpenedOn || t.Created), t.Title || "\u2014", t.Status || "Open", fmt(t.ResolvedOn),
           [t.Category, t.Description, t.ResolutionNotes ? "Resolution: " + t.ResolutionNotes : ""].filter(Boolean).join(" \u2014 ") || "\u2014"]),
-        emptyText: failed ? "" : "No tickets on record for this employee.",
+        emptyText: failed ? "" : "No service tickets on record for this employee.",
       });
     }
     return m;

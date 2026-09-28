@@ -156,10 +156,15 @@
   const STATUSES = ["Open", "In Progress", "Resolved"];
 
   async function renderTickets(container) {
+    const meta = await DS.spFields(L.tickets).catch(() => ({}));
+    const personAssigned = !!(meta.AssignedTo && /^User/.test(meta.AssignedTo.TypeAsString));
     const [tickets, cache] = await Promise.all([
-      DS.spGet(L.tickets, { orderby: "Id desc", top: 1000 }),
+      DS.spGet(L.tickets, personAssigned
+        ? { orderby: "Id desc", top: 1000, select: ["*", "AssignedTo/EMail", "AssignedTo/Title"], expand: "AssignedTo" }
+        : { orderby: "Id desc", top: 1000 }),
       DS.data.load(),
     ]);
+    if (personAssigned) tickets.forEach(t => { const a = t.AssignedTo; t.AssignedTo = a ? (a.EMail || a.Title || "") : ""; });
     const cats = cache.idx.ticketCategories;
     container.innerHTML = "";
 

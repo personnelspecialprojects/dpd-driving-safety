@@ -422,6 +422,51 @@
         el("div", { style: "display:flex; align-items:center; gap:14px" }, [exportBtn, status]),
       ]),
     ]));
+
+    container.appendChild(await employeeRecordCard());
+  }
+
+  /* ---- Reports: one employee's driving record (PDF) ----
+     Same export as Roster → employee → "Export record (PDF)". Search by name,
+     Employee #, or badge (active and separated employees). */
+  async function employeeRecordCard() {
+    const cache = await DS.data.load();
+    const K = v => DS.util.empKey(v);
+    const input = el("input", { class: "field", type: "search", placeholder: "Search by name, employee # or badge", style: "max-width:360px" });
+    const results = el("div", { style: "margin-top:10px" });
+    function paint() {
+      const q = input.value.trim().toLowerCase();
+      results.innerHTML = "";
+      if (q.length < 2) { results.appendChild(el("div", { class: "help", text: "Type at least 2 characters." })); return; }
+      const qk = K(q);
+      const hits = cache.roster.filter(r =>
+        String(r.Title || "").toLowerCase().includes(q) || String(r.LastName || "").toLowerCase().includes(q) ||
+        K(r.EmployeeId).includes(qk) || (r.Badge && DS.ids.normBadge(r.Badge).toLowerCase().includes(DS.ids.normBadge(q).toLowerCase())))
+        .sort((a, b) => String(a.LastName || a.Title).localeCompare(String(b.LastName || b.Title)));
+      if (!hits.length) { results.appendChild(el("div", { class: "help", text: "No employee matches that search." })); return; }
+      hits.slice(0, 10).forEach(r => {
+        const btn = el("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Export record (PDF)" });
+        btn.addEventListener("click", () => DS.recordExport ? DS.recordExport.open(r)
+          : DS.toast("Export isn't available \u2014 record-export.js didn't load. Check that it's in the repo and refresh.", "error"));
+        results.appendChild(el("div", { style: "display:flex; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--line-2)" }, [
+          el("div", { style: "flex:1" }, [
+            el("b", { text: r.Title || "\u2014", style: "font-size:14px" }),
+            el("div", { class: "help", style: "margin:0", text: ["#" + r.EmployeeId, r.Badge ? "badge " + r.Badge : "", r.Rank, DS.util.isActive(r) ? "" : "Separated"].filter(Boolean).join(" \u00b7 ") }),
+          ]),
+          btn,
+        ]));
+      });
+      if (hits.length > 10) results.appendChild(el("div", { class: "help", text: (hits.length - 10) + " more \u2014 type more of the name or number to narrow it down." }));
+    }
+    input.addEventListener("input", paint);
+    paint();
+    return el("div", { class: "card", style: "margin-top:20px" }, [
+      el("div", { class: "card__head" }, el("h3", { text: "Employee driving record (PDF)" })),
+      el("div", { class: "card__body" }, [
+        el("div", { class: "import-note", text: "For an employee who asks for their driving record. Find them, then choose which sections to include: driving history, defensive driving courses, physicals, and service tickets." }),
+        input, results,
+      ]),
+    ]);
   }
 
   /* ---- register ---- */

@@ -475,6 +475,9 @@
       const body = el("div", { class: "card__body" });
       body.appendChild(el("div", { class: "detail__name", text: r.Title || "—" }));
       body.appendChild(el("div", { class: "detail__sub", text: [r.EmployeeId, r.Rank].filter(Boolean).join(" · ") || "—" }));
+      const exportBtn = el("button", { class: "btn btn--ghost btn--sm", type: "button", text: "Export record (PDF)" });
+      exportBtn.addEventListener("click", () => DS.recordExport ? DS.recordExport.open(r) : DS.toast("Export isn't available \u2014 record-export.js didn't load.", "error"));
+      body.appendChild(el("div", { style: "margin:-8px 0 14px" }, exportBtn));
 
       if (String(r.Badge || "").trim()) body.appendChild(detailRow("Badge", String(r.Badge)));
       body.appendChild(detailRow("Employment", employmentControl(r)));

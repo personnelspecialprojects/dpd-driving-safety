@@ -140,7 +140,7 @@
   function physBadge(row) {
     if (row.urgency === "missing") return DS.badge("Missing", "overdue");
     if (row.urgency === "overdue") return DS.badge("Overdue \u00b7 " + DS.fmtDate(row.dueDate), "overdue");
-    return DS.badge(DS.fmtDate(row.dueDate), "due");
+    return DS.badge((row.newHire ? "New hire \u00b7 due " : "") + DS.fmtDate(row.dueDate), "due");
   }
   // driver-status cell (Secondary de-emphasized)
   function driverCell(required) {
@@ -156,8 +156,9 @@
 
   function physicalDetailBadge(phys, leadDays) {
     if (!phys.applicable) return DS.badge("Not applicable (Non-Driver)", "neutral");
+    if (phys.inGrace) return DS.badge("New hire \u2014 first physical due " + DS.fmtDate(phys.dueDate), withinLead(phys.dueDate, leadDays) ? "due" : "neutral");
     if (!phys.has) return phys.required
-      ? DS.badge("Required \u2014 none on record", "overdue")
+      ? DS.badge("Required \u2014 none on record" + (phys.graceEnd ? " (was due " + DS.fmtDate(phys.graceEnd) + ")" : ""), "overdue")
       : DS.badge("Not required \u2014 none on record", "neutral");
     if (!phys.dueDate) return DS.badge("On record \u2014 no due date", "neutral");
     if (phys.overdue) return DS.badge("Overdue \u00b7 " + DS.fmtDate(phys.dueDate), "overdue");

@@ -173,6 +173,7 @@
       courseRenewalYears: cfgNum(config, "CourseRenewalYears", 3),
       courseGraceMonths: cfgNum(config, "CourseGraceMonths", 12),
       physicalDefaultYears: cfgNum(config, "PhysicalDefaultYears", 2),
+      physicalGraceMonths: cfgNum(config, "PhysicalGraceMonths", 20),   // new Primary drivers: first physical due this long after hire
       awardMilestoneYears: cfgNum(config, "AwardMilestoneYears", 5),
       awardResetPointThreshold: cfgNum(config, "AwardResetPointThreshold", 0),
       // driving-eligibility (point-based, rolling window)
@@ -312,7 +313,14 @@
       const p = cache.idx.physLatest[emp];
       const today = startOfToday();
       if (!p) {
-        return { has: false, required, applicable, desig, dueDate: null,
+        // New-hire grace: a Primary driver's first physical is due hire date + grace months.
+        const hire = DS.parseDate(r.HireDate);
+        const graceEnd = required && hire ? addMonths(hire, cache.idx.physicalGraceMonths) : null;
+        if (graceEnd && graceEnd >= today) {
+          return { has: false, required, applicable, desig, dueDate: graceEnd, missing: false, overdue: false,
+                   inGrace: true, graceEnd, status: "New hire" };
+        }
+        return { has: false, required, applicable, desig, dueDate: null, graceEnd,
                  missing: required, overdue: required,
                  status: required ? "Missing" : (applicable ? "None on record" : "Not applicable") };
       }
@@ -412,7 +420,7 @@
         if (!urgency) return;                                            // Secondary w/ no physical is not flagged here
         out.push({
           employeeId: emp, name: r.Title, dueDate: s.dueDate,
-          required: s.required, urgency,
+          required: s.required, urgency, newHire: !!s.inGrace,
           overdue: urgency === "overdue" || urgency === "missing",
         });
       });

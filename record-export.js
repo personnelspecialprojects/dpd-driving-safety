@@ -146,7 +146,8 @@
     if (opts.physicals) {
       const ph = DS.compute.physicalFor(cache, emp);
       const status = !ph.applicable ? "Not required (Non-Driver)"
-        : !ph.has ? (ph.required ? "No physical on record" : "None on record (not required)")
+        : ph.inGrace ? "New hire \u2014 first physical due " + DS.fmtDate(ph.dueDate)
+        : !ph.has ? (ph.required ? "No physical on record" + (ph.graceEnd ? " (was due " + DS.fmtDate(ph.graceEnd) + ")" : "") : "None on record (not required)")
         : !ph.dueDate ? "On record \u2014 no expiration date"
         : ph.overdue ? "Expired " + DS.fmtDate(ph.dueDate)
         : "Current \u2014 expires " + DS.fmtDate(ph.dueDate);

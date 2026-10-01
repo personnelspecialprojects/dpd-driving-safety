@@ -43,6 +43,8 @@
   async function renderAdmin(container) {
     const rows = await DS.spGet(L.config, { top: 1 });
     const cfg = rows[0] || null;
+    const cfgCols = await DS.spFields(L.config).catch(() => null);        // which Config columns exist
+    const hasCol = name => !cfgCols || !!cfgCols[name];
     container.innerHTML = "";
 
     const g = (key, dflt) => (cfg && cfg[key] != null && cfg[key] !== "") ? cfg[key] : dflt;
@@ -54,6 +56,8 @@
     const courseRenew = numInput(g("CourseRenewalYears", 3));
     const courseGrace = numInput(g("CourseGraceMonths", 12));
     const physDefault = numInput(g("PhysicalDefaultYears", 2));
+    const physGrace = numInput(g("PhysicalGraceMonths", 20));
+    const physGraceReady = hasCol("PhysicalGraceMonths");
     const awardMilestone = numInput(g("AwardMilestoneYears", 5));
     const resetThreshold = numInput(g("AwardResetPointThreshold", 0));
     const recordsStart = el("input", { class: "field", type: "date", value: DS.isoDate(g("AccidentRecordsStartDate", "")) || "" });
@@ -83,6 +87,9 @@
         field("Course renewal cycle (years)", courseRenew, "How often defensive driving must be renewed."),
         field("New-hire grace period (months)", courseGrace, "How long new hires have before courses are due."),
         field("Physical fallback cycle (years)", physDefault, "Used only when a physical has no expiration date."),
+        field("New-hire physical grace period (months)", physGrace, physGraceReady
+          ? "New Primary drivers' first physical is due this many months after their hire date."
+          : "Default is 20 months. To change it, first add a Number column named PhysicalGraceMonths to the DrivingSafety_Config list."),
         field("Award milestone interval (years)", awardMilestone, "Years between safe-driving award milestones."),
         field("Points that reset the award streak", resetThreshold, "An accident with more than this many final points resets the streak. 0 = any points."),
         field("Accident records complete from (optional)", recordsStart, "Leave blank \u2014 awards count safe driving from the oldest accident in the uploaded data. Only set this to override that date. With no accident records, no one is award-eligible."),
@@ -114,6 +121,14 @@
       body,
     ]));
 
+    const loaded = {
+      CourseAlertLeadDays: courseLead.value, PhysicalAlertLeadDays: physLead.value, CourseRenewalYears: courseRenew.value,
+      CourseGraceMonths: courseGrace.value, PhysicalDefaultYears: physDefault.value, PhysicalGraceMonths: physGrace.value,
+      AwardMilestoneYears: awardMilestone.value, AwardResetPointThreshold: resetThreshold.value, PointRolloffMonths: rolloff.value,
+      RestrictivePoints: restrictivePts.value, NoDrivingPoints: noDrivingPts.value, RequiredCourseTitles: required.value.trim(),
+      TicketCategories: categories.value.trim(), DigestRecipients: recipients.value.trim(), AllowMarkAsAwarded: allowMark.checked,
+      AccidentRecordsStartDate: recordsStart.value || null,
+    };
     saveBtn.addEventListener("click", async () => {
       saveBtn.disabled = true; saveBtn.textContent = "Saving…";
       const fields = {
@@ -122,6 +137,7 @@
         CourseRenewalYears: numVal(courseRenew),
         CourseGraceMonths: numVal(courseGrace),
         PhysicalDefaultYears: numVal(physDefault),
+        PhysicalGraceMonths: numVal(physGrace),
         AwardMilestoneYears: numVal(awardMilestone),
         AwardResetPointThreshold: numVal(resetThreshold),
         PointRolloffMonths: numVal(rolloff),
@@ -133,12 +149,21 @@
         AllowMarkAsAwarded: allowMark.checked,
       };
       if (recordsStart.value || (cfg && cfg.AccidentRecordsStartDate)) fields.AccidentRecordsStartDate = recordsStart.value || null;
+      // Save only settings whose Config column exists; name any CHANGED setting that couldn't be saved.
+      const notSaved = [];
+      Object.keys(fields).forEach(k => {
+        if (hasCol(k)) return;
+        const before = cfg && cfg[k] != null ? cfg[k] : undefined;
+        if (loaded[k] !== undefined && String(fields[k]) !== String(loaded[k]) && String(fields[k]) !== String(before)) notSaved.push(k);
+        delete fields[k];
+      });
       try {
         if (cfg) await DS.spUpdate(L.config, cfg.Id, fields);
         else { fields.Title = "Config"; await DS.spCreate(L.config, fields); }
-        await DS.audit("Settings saved", L.config, cfg ? cfg.Id : null, "");
+        await DS.audit("Settings saved", L.config, cfg ? cfg.Id : null, notSaved.length ? "Not saved (no column): " + notSaved.join(", ") : "");
         DS.data.clear();
-        DS.toast("Settings saved.", "success");
+        if (notSaved.length) DS.toast("Saved, except: " + notSaved.join(", ") + ". Those settings need a matching column in the DrivingSafety_Config list (Number, or text for lists), then save again.", "error");
+        else DS.toast("Settings saved.", "success");
       } catch (e) {
         DS.toast("Couldn't save settings: " + e.message + " — a new setting may need its column added to the Config list.", "error");
       } finally {

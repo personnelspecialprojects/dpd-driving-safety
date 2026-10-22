@@ -894,7 +894,7 @@
     rows: "Rows in file", added: "Added", updated: "Updated", inactivated: "Marked inactive", byName: "Matched by name (your choice)",
     byEmployeeNumber: "Matched by employee #", byBadge: "Matched by badge", noMatch: "Matched no one",
     matchedTwoPeople: "Two possible people (unsettled)", resolvedByName: "Two possible people (name confirmed)", alreadyInSharePoint: "Already in SharePoint",
-    repeatedInFile: "Repeated in file", onlySomeCourses: "Only some required courses",
+    repeatedInFile: "Repeated in file", onlySomeCourses: "Only some required courses", pointsMismatch: "Points to check",
     noEmployeeNumber: "No employee number", failed: "Failed to save",
     employees: "Employees in sheet", savesAttempted: "Total saves (progress bar)", designationsSet: "Designations set", physicalsAdded: "Physical records added",
     coursesAdded: "Course records added", alreadyOnFile: "Already on file", notOnRoster: "Not on roster",

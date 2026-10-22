@@ -101,40 +101,98 @@
     return { records, warnings };
   }
 
+  /* Accident / collision export (Origami Risk). Two layouts are accepted:
+     • Collision report:  Origami #, Incident Date, Employee, Employee Number, City Equipment #,
+       Incident Location, …, City Department, IRC/IAB Final Decision, City Driver Contributing
+       Factor, Points, Emergency Vehicle Type
+     • Older equipment-incidents export: Incident Number, Loss Date, Employee Number,
+       IRC Decision, IRC/IAB Final Decision, Accident Street1, Vehicle, Vehicle Make/Model
+     Columns are matched by name, not position. Points come only from the
+     IRC/IAB Final Decision text; any Points column is ignored. */
+  /* Points come ONLY from the IRC/IAB Final Decision text (any Points column is ignored).
+     Reads "2 points", "1 point", "0 pts", "2pts.", "2 point(s)", "two points".
+     Returns { points, note }; note is set when a person should double-check. */
+  const WORD_NUM = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  function decisionPoints(text) {
+    const t = String(text || "").trim();
+    if (!t) return { points: 0, note: "No final decision yet — saved as 0 points" };
+    const re = /\b(\d+|zero|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:pts?|points?)\b/gi;
+    const found = []; let m;
+    while ((m = re.exec(t))) { const w = m[1].toLowerCase(); found.push(w in WORD_NUM ? WORD_NUM[w] : Number(w)); }
+    if (found.length) {
+      const distinct = Array.from(new Set(found));
+      return { points: found[0], note: distinct.length > 1 ? "Decision lists more than one point value (" + distinct.join(", ") + ") — used " + found[0] : null };
+    }
+    // No point value written: fine for non-preventable / non-incident; worth a look if it says preventable.
+    const preventable = /\bpreventable\b/i.test(t) && !/\bnon[\s-]*preventable\b/i.test(t);
+    return { points: 0, note: preventable ? "Says preventable but lists no points — saved as 0 points" : null };
+  }
+
+  const ACC_PATTERNS = {
+    incident: /^(origami\s*#|origami\s*(number|no\.?|id)|incident\s*(number|#|no\.?))$/,
+    date: /^(incident|loss|accident)\s*date$/,
+    empId: /^emp(loyee)?\s*(#|number|num|no\.?|id)$/,
+    name: /^(employee(\s*name)?|driver(\s*name)?)$/,
+    finalDecision: /^irc\s*\/\s*iab\s*final\s*decision$/,
+    initialDecision: /^irc\s*decision$/,
+    location: /^(incident\s*location|accident\s*street\s*1?|location)$/,
+    vehicle: /^(city\s*equipment\s*#?|vehicle|equipment\s*#?)$/,
+    make: /^vehicle\s*make$/, model: /^vehicle\s*model$/,
+    department: /^city\s*department$/,
+  };
   function parseAccidents(wb) {
     const ws = wb.Sheets[wb.SheetNames[0]];
     const r = rowsOf(ws);
-    const loc = locate(r, "Incident Number");
-    if (!loc) throw new Error("Couldn't find the 'Incident Number' header — is this the Origami Risk equipment-incidents export?");
-    const ci = colFinder(loc.header);
-    const iNum = ci("Incident Number"), iLoss = ci("Loss Date"), iEmp = ci("Employee Number"),
-          iIRC = ci("IRC Decision"), iFinal = ci("IRC/IAB Final Decision"),
-          iStreet = ci("Accident Street1"), iVeh = ci("Vehicle"), iMake = ci("Vehicle Make"), iModel = ci("Vehicle Model");
-    const iName = [ci("Employee Name"), ci("Employee"), ci("Driver Name"), ci("Driver")].find(x => x >= 0);
-    const records = [];
-    for (let i = loc.headerIdx + 1; i < r.length; i++) {
-      const row = r[i]; if (!row || !row[iNum]) continue;
-      const initial = String(row[iIRC] || "");
-      const final = String(row[iFinal] || "");
-      records.push({
-        IncidentNumber: String(row[iNum]).trim(),
-        EmployeeId: String(row[iEmp] || "").trim(),
-        AccidentDate: DS.isoDate(row[iLoss]),
+    let headerIdx = -1, header = null;
+    for (let i = 0; i < Math.min(r.length, 40); i++) {
+      if (findFlexCol(r[i] || [], ACC_PATTERNS.incident) >= 0) { headerIdx = i; header = r[i]; break; }
+    }
+    if (headerIdx < 0) throw new Error("Couldn't find the incident number column (“Origami #” or “Incident Number”) — is this the Origami Risk collision export?");
+    const c = {}; Object.keys(ACC_PATTERNS).forEach(k => { c[k] = findFlexCol(header, ACC_PATTERNS[k]); });
+    const cell = (row, k) => c[k] >= 0 ? row[c[k]] : "";
+    const records = [], pointConflicts = [];
+    let noDate = 0, otherDept = 0, noEmp = 0;
+    for (let i = headerIdx + 1; i < r.length; i++) {
+      const row = r[i]; if (!row || !String(cell(row, "incident")).trim()) continue;
+      const final = String(cell(row, "finalDecision") || "").trim();
+      const initial = String(cell(row, "initialDecision") || "").trim();
+      const dp = decisionPoints(final);
+      const points = dp.points;
+      const date = DS.isoDate(cell(row, "date"));
+      if (!date) noDate++;
+      const dept = String(cell(row, "department") || "").trim();
+      if (dept && !/police/i.test(dept)) otherDept++;
+      if (!String(cell(row, "empId") || "").trim()) noEmp++;
+      const rec = {
+        IncidentNumber: String(cell(row, "incident")).trim(),
+        EmployeeId: String(cell(row, "empId") == null ? "" : cell(row, "empId")).trim(),
+        AccidentDate: date,
         InitialDecision: initial,
-        InitialPoints: extractPoints(initial),
+        InitialPoints: initial ? extractPoints(initial) : 0,
         FinalDecision: final,
-        FinalPoints: extractPoints(final),
-        Vehicle: String(row[iVeh] || ""),
-        VehicleMakeModel: [row[iMake], row[iModel]].filter(Boolean).join(" ").trim(),
-        Location: String(row[iStreet] || ""),
+        FinalPoints: points,
+        Vehicle: String(cell(row, "vehicle") || ""),
+        VehicleMakeModel: [cell(row, "make"), cell(row, "model")].filter(Boolean).join(" ").trim(),
+        Location: String(cell(row, "location") || ""),
         Source: "Bulk Upload",
         CountsAgainstStreak: "Auto",
-        __name: iName != null ? String(row[iName] || "").trim() : "",
+        __name: String(cell(row, "name") || "").trim(),
         __row: rowNo(ws, i),
-      });
+      };
+      // This report has no initial decision or make/model columns — don't send empty fields for them
+      if (c.initialDecision < 0) { delete rec.InitialDecision; delete rec.InitialPoints; }
+      if (c.make < 0 && c.model < 0) delete rec.VehicleMakeModel;
+      if (dp.note) { rec.__pointsNote = dp.note; pointConflicts.push(rec); }
+      records.push(rec);
     }
-    return { records, warnings: [] };
+    const warnings = [];
+    if (c.date < 0) warnings.push("No incident/loss date column found — accidents can't count toward points or awards without a date.");
+    else if (noDate) warnings.push(noDate + " row(s) have no incident date — they're saved but won't count toward points or awards.");
+    if (otherDept) warnings.push(otherDept + " row(s) list a City Department other than Police — check that the export is filtered to DPD.");
+    if (pointConflicts.length) warnings.push(pointConflicts.length + " row(s) have a final decision without a clear point value — listed below for review.");
+    return { records, warnings, pointConflicts };
   }
+
 
   /* ---- flexible column matching for Roster. The real SQL report headers are
      Emp#, FirstName, LastName, Rank, WorkingOrg, Workgroup, Supervisor,
@@ -253,10 +311,10 @@
       note: 'Only rows marked "Passed" for a required course are imported.',
     },
     accidents: {
-      source: "Origami Risk — DPD Equipment Incidents export",
-      columns: ["Incident Number", "Loss Date", "Employee Number", "IRC Decision", "IRC/IAB Final Decision", "Accident Street1", "Vehicle", "Vehicle Make", "Vehicle Model"],
-      sample: ["INC-48213", "3/2/2026", "123456", "2 pts", "2 pts", "Main St", "1", "Ford", "Explorer"],
-      note: "Deduped by Incident Number — safe to re-upload the same export.",
+      source: "Origami Risk collision report",
+      columns: ["Origami #", "Incident Date", "Employee", "Employee Number", "City Equipment #", "Incident Location", "City Department", "IRC/IAB Final Decision", "Points"],
+      sample: ["27-66200", "10/11/2026", "Smith, Jordan", "123456", "238235", "4118 S Fitzhugh Ave", "Dallas Police Dept", "Preventable 2 points", "2"],
+      note: "Points are read only from the IRC/IAB Final Decision text (e.g. “Preventable 2 points”); the Points column is ignored. Re-uploading is safe.",
     },
     roster: {
       source: "DPD personnel SQL report export",
@@ -292,10 +350,10 @@
       parse: (wb) => parseAccidents(wb),
       cols: [["Incident #", "IncidentNumber"], ["Employee", "EmployeeId"], ["Date", "AccidentDate"], ["Final pts", "FinalPoints"]],
       describe: r => "Incident " + (r.IncidentNumber || "?") + " \u00b7 " + DS.fmtDate(r.AccidentDate),
-      dedupKey: r => String(r.IncidentNumber).trim(),
+      dedupKey: r => String(r.IncidentNumber).trim() + "|" + DS.util.empKey(r.EmployeeId),
       existingKeys: async () => {
-        const rows = await DS.spGet(DS.LISTS.accidents, { select: ["IncidentNumber"] });
-        return new Set(rows.map(x => String(x.IncidentNumber || "").trim()));
+        const rows = await DS.spGet(DS.LISTS.accidents, { select: ["IncidentNumber", "EmployeeId"] });
+        return new Set(rows.map(x => String(x.IncidentNumber || "").trim() + "|" + DS.util.empKey(x.EmployeeId)));
       },
     },
     roster: {
@@ -519,7 +577,7 @@
       }
 
       state.parsed = { records, toWrite, dupCount, onFileDups, inFileDups, warnings, fileName: file.name, match, unmatched, conflicts, partial,
-        nameWrite: typeof nameWrite !== "undefined" ? nameWrite : [] };
+        nameWrite: typeof nameWrite !== "undefined" ? nameWrite : [], pointConflicts: parsed.pointConflicts || [] };
       state.useNameMatch = false;
       renderPreview(result, container);
     } catch (e) {
@@ -615,7 +673,7 @@
   }
 
   /* ---------------- Problem rows (preview, result screen, Upload results log) ---------------- */
-  const REVIEW_REASONS = ["No match on roster", "Two possible people", "Failed to save", "No employee number", "Employee # repeated in file"];
+  const REVIEW_REASONS = ["No match on roster", "Two possible people", "Failed to save", "No employee number", "Employee # repeated in file", "Check points"];
   function problemRows(t, p, failed) {
     const out = [];
     const base = r => ({ row: r.__row || "", id: r.__sourceId != null ? r.__sourceId : String(r.EmployeeId || ""),
@@ -637,6 +695,8 @@
         ". The same number is " + (c.other.Title || "?") + "'s " + (c.row.__method === "badge" ? "employee #" : "badge") + "." })));
     (p.noEmp || []).forEach(r => out.push(Object.assign(base(r), { why: "No employee number", note: r.Badge ? "Badge " + r.Badge : "" })));
     (p.dupRows || []).forEach(d => out.push(Object.assign(base(d.row), { why: "Employee # repeated in file", note: "Row " + (d.first.__row || "?") + " used instead" })));
+    (p.pointConflicts || []).forEach(x => out.push(Object.assign(base(x), { why: "Check points",
+      info: "Decision: “" + (x.FinalDecision || "") + "”", note: x.__pointsNote })));
     (p.partial || []).forEach(x => out.push(Object.assign(base(x.row), { why: "Only some required courses", info: "In file: " + (x.has.join(", ") || "none"), note: "Not in file: " + x.missing.join(", ") })));
     (p.inFileDups || []).forEach(d => out.push(Object.assign(base(d.row), { why: "Repeated in file", note: "Same as row " + (d.first.__row || "?") })));
     (p.onFileDups || []).forEach(r => out.push(Object.assign(base(r), { why: "Already in SharePoint", note: "" })));
@@ -778,7 +838,7 @@
         noMatch: (p.unmatched || []).length - byName, matchedTwoPeople: (p.conflicts || []).filter(c => !c.byName).length,
         resolvedByName: (p.conflicts || []).filter(c => c.byName).length,
         alreadyInSharePoint: (p.onFileDups || []).length, repeatedInFile: (p.inFileDups || []).length,
-        onlySomeCourses: (p.partial || []).length, failed: createErrors.length } });
+        onlySomeCourses: (p.partial || []).length, pointsMismatch: (p.pointConflicts || []).length, failed: createErrors.length } });
 
       DS.data.clear();  // recompute dashboard/roster off fresh data next visit
 

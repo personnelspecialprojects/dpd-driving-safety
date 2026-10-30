@@ -470,7 +470,7 @@ textarea.field { resize: vertical; min-height: 74px; line-height: 1.45; }
         </div>
       </div>
       <nav class="nav" id="nav"><!-- links injected --></nav>
-      <div class="sidebar__foot" id="sidebarFoot">v0.1 · foundation</div>
+      <div class="sidebar__foot" id="sidebarFoot"></div>
     </aside>
 
     <main class="main">
@@ -510,11 +510,17 @@ function loadMsalFallback() {
    CONFIG
    ============================================================ */
 const CONFIG = {
+  release:     "v1.1 · 2026-10-30",   // bump on every change; shown in the sidebar
   clientId:    "0d384d2a-9a9e-46f6-a195-ad63f9e94f06",   // reused "PatrolBidPortal" registration
   tenantId:    "2935709e-c10c-4809-a302-852d369f8700",
-  // Hardcoded per convention — never window.location.href.
-  // This exact URL must be added as a redirect URI on the app registration.
-  redirectUri: "https://personnelspecialprojects.github.io/dpd-driving-safety/",
+  // Every address the app is published at. Sign-in uses the one that matches
+  // the page's folder address. Each one must ALSO be added in Azure
+  // (PatrolBidPortal → Authentication → Single-page application), exact
+  // spelling with the trailing slash.
+  redirectUris: [
+    "https://personnelspecialprojects.github.io/dpd-driving-safety/",
+    "https://dpd-driving-safety.dpd-apps.workers.dev/",
+  ],
   spHost:      "https://dallastxgov.sharepoint.com",
   siteUrl:     "https://dallastxgov.sharepoint.com/sites/DrivingSafetyProgram",
   graphScopes: ["User.Read"],
@@ -672,11 +678,25 @@ let msalInstance = null;
 let account = null;
 let booted = false;
 
+/* Pick the redirect URI that matches this page's folder address (ignores
+   index.html and query strings). Returns null if the address isn't listed. */
+function currentBase() {
+  return (location.origin + location.pathname.replace(/[^/]*$/, "")).toLowerCase();
+}
+function redirectUri() {
+  const list = CONFIG.redirectUris || [CONFIG.redirectUri];
+  for (let i = 0; i < list.length; i++) {
+    if (String(list[i]).toLowerCase() === currentBase()) return list[i];
+  }
+  return null;
+}
+const REDIRECT_URI = redirectUri();
+
 const msalConfig = {
   auth: {
     clientId: CONFIG.clientId,
     authority: "https://login.microsoftonline.com/" + CONFIG.tenantId,
-    redirectUri: CONFIG.redirectUri,
+    redirectUri: REDIRECT_URI,
     navigateToLoginRequestUrl: true,
   },
   cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false },
@@ -1055,6 +1075,14 @@ DS.navigate = function (key) { location.hash = "#/" + key; };
 async function boot() {
   if (booted) return;
   if (typeof msal === "undefined") { showLoginError("Sign-in library unavailable. Reload the page."); return; }
+  if (!REDIRECT_URI) {
+    booted = true;
+    document.getElementById("login").style.display = "flex";
+    document.getElementById("signInBtn").disabled = true;
+    showLoginError("This address isn't set up for sign-in yet: " + currentBase() +
+      " — add it to redirectUris in index.html and to the app registration in Azure.");
+    return;
+  }
   booted = true;
   msalInstance = new msal.PublicClientApplication(msalConfig);
 
@@ -1082,6 +1110,7 @@ async function boot() {
 }
 
 async function startApp() {
+  document.getElementById("sidebarFoot").textContent = CONFIG.release;
   document.getElementById("login").style.display = "none";
   document.getElementById("app").style.display = "block";
   buildNav();
@@ -1098,7 +1127,7 @@ document.getElementById("signInBtn").addEventListener("click", async () => {
   } catch (e) { showLoginError("Couldn't start sign-in: " + (e.message || e)); }
 });
 document.getElementById("signOutBtn").addEventListener("click", () => {
-  msalInstance.logoutRedirect({ account });
+  msalInstance.logoutRedirect({ account, postLogoutRedirectUri: REDIRECT_URI });
 });
 
 /* Boot after all scripts (foundation + screen modules) have loaded and

@@ -495,7 +495,8 @@
 
       if (t.mode === "upsert") {
         DS.showLoading(result, "Comparing with the current roster…");
-        const existing = await DS.spGet(DS.LISTS.roster, { select: ["Id", "EmployeeId"] });
+        const existing = await DS.spGet(DS.LISTS.roster, { select: ["Id", "EmployeeId", "ActiveEmployee"] });
+        state.rosterMode = null;   // must be chosen on every roster upload
         if (parsed.hasBadge && !(await DS.spFieldExists(DS.LISTS.roster, "Badge"))) {
           records.forEach(r => { delete r.Badge; });
           warnings.push("This file has badge numbers, but DrivingSafety_Roster has no 'Badge' column yet. Add it (Single line of text) and upload again so badges are stored.");
@@ -511,9 +512,11 @@
         if (dupRows.length) warnings.push(dupRows.length + " employee number(s) appear more than once in the file \u2014 the first row for each is used.");
         const fileIds = new Set(unique.map(r => key(r.EmployeeId)));
         const toUpdate = [], toCreate = [];
-        unique.forEach(r => { const ex = existingMap[key(r.EmployeeId)]; if (ex) toUpdate.push({ id: ex.Id, fields: r }); else toCreate.push(r); });
-        const toInactivate = existing.filter(e => { const k = key(e.EmployeeId); return k && !fileIds.has(k); });
-        state.parsed = { mode: "upsert", records, toUpdate, toCreate, toInactivate, warnings, fileName: file.name, noEmp: parsed.noEmp || [], dupRows };
+        unique.forEach(r => { const ex = existingMap[key(r.EmployeeId)]; if (ex) toUpdate.push({ id: ex.Id, fields: r, wasActive: activeVal(ex.ActiveEmployee) }); else toCreate.push(r); });
+        // Only people who are active now; anyone already inactive stays as they are.
+        const toInactivate = existing.filter(e => { const k = key(e.EmployeeId); return k && !fileIds.has(k) && activeVal(e.ActiveEmployee); });
+        const activeCount = existing.filter(e => activeVal(e.ActiveEmployee)).length;
+        state.parsed = { mode: "upsert", records, toUpdate, toCreate, toInactivate, activeCount, fileCount: unique.length, warnings, fileName: file.name, noEmp: parsed.noEmp || [], dupRows };
         renderPreview(result, container);
         return;
       }
@@ -602,17 +605,42 @@
     if (p.mode === "upsert") {
       body.appendChild(el("div", { class: "import-note", text:
         p.toUpdate.length + " existing updated \u00b7 " + p.toCreate.length + " new \u00b7 designations preserved." }));
-      if (p.toInactivate.length) {
-        const wrap = el("label", { class: "check", style: "margin:2px 0 12px" });
-        inactivateCb = el("input", { type: "checkbox" }); inactivateCb.checked = true;
-        wrap.appendChild(inactivateCb);
-        wrap.appendChild(el("span", { text: "Mark " + p.toInactivate.length + " employee(s) not in this file as inactive" }));
-        body.appendChild(wrap);
-        body.appendChild(el("div", { class: "import-note warn", text:
-          "That count should roughly match recent separations. If it's unexpectedly large, this may be only a partial roster \u2014 uncheck the box." }));
-      }
-      confirmLabel = "Apply roster update";
-      doRun = () => runUpsert(result, container, inactivateCb ? inactivateCb.checked : false);
+      // Import type — must be chosen every time. No default, so a short list
+      // (e.g. academy recruits) can't accidentally inactivate everyone else.
+      const nOut = p.toInactivate.length;
+      const partial = p.activeCount > 0 && p.fileCount < p.activeCount * 0.5;
+      body.appendChild(el("div", { style: "font-weight:600; font-size:14px; margin:10px 0 6px", text: "What kind of roster file is this?" }));
+      const opt = (val, title, desc) => {
+        const r = el("input", { type: "radio", name: "rosterMode", value: val });
+        r.addEventListener("change", () => { state.rosterMode = val; updateConfirm(); });
+        return el("label", { class: "check", style: "align-items:flex-start; border:1px solid var(--line, #d8dee8); border-radius:8px; padding:10px 12px; margin:0 0 8px" }, [r, el("span", null, [
+          el("b", { text: title }), el("span", { class: "help", style: "display:block; margin-top:2px", text: desc })])]);
+      };
+      body.appendChild(opt("add", "Add or update only",
+        "Use for a short list, such as academy recruits or a few transfers. The " + (p.toCreate.length + p.toUpdate.length) +
+        " people in this file are added or updated (and marked active). No one else on the roster is changed."));
+      body.appendChild(opt("full", "Full roster \u2014 this file is everyone",
+        "Use for the monthly SQL roster export. People in the file are added or updated, and " +
+        (nOut ? nOut.toLocaleString() + " active employee(s) not in it will be marked inactive" : "no one would be marked inactive") +
+        " (their records and designations are kept)."));
+      const fullWarn = el("div", { class: "import-note warn", style: "display:none", text:
+        "This file has " + p.fileCount.toLocaleString() + " people, but the roster has " + p.activeCount.toLocaleString() +
+        " active employees. It looks like a partial list. As a full roster, it would mark " + nOut.toLocaleString() + " people inactive." });
+      const ackCb = el("input", { type: "checkbox" });
+      const ackWrap = el("label", { class: "check", style: "display:none; margin:0 0 10px" }, [ackCb,
+        el("span", { text: "I understand \u2014 mark " + nOut.toLocaleString() + " people inactive." })]);
+      ackCb.addEventListener("change", () => updateConfirm());
+      body.appendChild(fullWarn); body.appendChild(ackWrap);
+      updateConfirm = () => {
+        const m = state.rosterMode, needAck = m === "full" && partial && nOut > 0;
+        fullWarn.style.display = ackWrap.style.display = needAck ? "" : "none";
+        confirmBtn.disabled = !m || (needAck && !ackCb.checked);
+        confirmBtn.textContent = !m ? "Choose a file type above" : m === "add"
+          ? "Add / update " + (p.toCreate.length + p.toUpdate.length) + " people"
+          : "Apply full roster" + (nOut ? " (" + nOut.toLocaleString() + " marked inactive)" : "");
+      };
+      confirmLabel = "Choose a file type above";
+      doRun = () => { if (state.rosterMode) runUpsert(result, container, state.rosterMode === "full"); };
     } else {
       let summary;
       if (t.mode === "append-dedup") summary = p.toWrite.length + " new \u00b7 " +
@@ -657,7 +685,8 @@
 
     const confirmBtn = el("button", { class: "btn", text: confirmLabel });
     confirmBtn.disabled = (p.mode !== "upsert" && p.toWrite.length === 0);
-    if (p.mode !== "upsert") {
+    if (p.mode === "upsert") updateConfirm();
+    else {
       updateConfirm = () => {
         const n = p.toWrite.length + (state.useNameMatch ? (p.nameWrite || []).length : 0);
         confirmBtn.textContent = "Import (" + n + ")"; confirmBtn.disabled = n === 0;
@@ -743,6 +772,7 @@
       counts: entry.counts || {}, warnings: entry.warnings || [],
       review: (entry.problems || []).filter(x => REVIEW_REASONS.includes(x.why)).length,
       problems: (entry.problems || []).slice(0, 800), truncated: (entry.problems || []).length > 800 };
+    if (entry.undo) doc.undo = entry.undo;
     let json = JSON.stringify(doc);
     while (json.length > 60000 && doc.problems.length > 20) {
       doc.problems = doc.problems.slice(0, Math.floor(doc.problems.length / 2)); doc.truncated = true; json = JSON.stringify(doc);
@@ -760,11 +790,13 @@
     const listName = DS.LISTS.roster;
     const ops = [];
     // update existing: org fields (+ badge) + reactivate; NEVER DriverStatus → designation preserved
-    p.toUpdate.forEach(u => ops.push({ kind: "update", id: u.id, fields: Object.assign(stripMeta(u.fields), { ActiveEmployee: true }), rec: u.fields }));
+    p.toUpdate.forEach(u => ops.push({ kind: "update", id: u.id, fields: Object.assign(stripMeta(u.fields), { ActiveEmployee: true }), rec: u.fields, reactivate: !u.wasActive }));
     // new hires: designation left blank → "Needs a designation" on the Dashboard
     p.toCreate.forEach(r => ops.push({ kind: "create", fields: Object.assign(stripMeta(r), { ActiveEmployee: true }), rec: r }));
-    // departures: mark inactive (keeps the record + its designation for a possible return)
-    if (doInactivate) p.toInactivate.forEach(e => ops.push({ kind: "update", id: e.Id, fields: { ActiveEmployee: false }, rec: { EmployeeId: e.EmployeeId } }));
+    // departures (full roster only): mark inactive (keeps the record + its designation for a possible return)
+    if (doInactivate) p.toInactivate.forEach(e => ops.push({ kind: "update", id: e.Id, fields: { ActiveEmployee: false }, rec: { EmployeeId: e.EmployeeId }, inactivate: true }));
+    // What this import changed, so it can be undone from Upload results.
+    const undo = { start: new Date().toISOString(), mode: doInactivate ? "full" : "add", inactivated: [], reactivated: [], created: [] };
 
     result.innerHTML = "";
     const bar = el("div", { class: "progress" }, el("div", { class: "progress__bar" }));
@@ -775,22 +807,27 @@
     ])));
 
     const errors = await runBatched(ops, async op => {
-      if (op.kind === "create") await DS.spCreate(listName, op.fields);
-      else await DS.spUpdate(listName, op.id, op.fields);
+      if (op.kind === "create") { const made = await DS.spCreate(listName, op.fields); if (made && made.Id) undo.created.push(made.Id); }
+      else {
+        await DS.spUpdate(listName, op.id, op.fields);
+        if (op.inactivate) undo.inactivated.push(op.id);
+        else if (op.reactivate) undo.reactivated.push(op.id);
+      }
     }, (done, total, label) => { barFill.style.width = (total ? done / total * 100 : 100) + "%"; status.textContent = label || ("Processing " + done + " of " + total + "…"); }, null, "Roster upload");
     errors.forEach(e => { if (e.item && e.item.rec) e.item = e.item.rec; });
 
+    undo.end = new Date().toISOString();
     const updated = p.toUpdate.length, created = p.toCreate.length, inactivated = doInactivate ? p.toInactivate.length : 0;
-    await DS.audit("Roster import", listName, null,
+    await DS.audit("Roster import", listName, null, (doInactivate ? "Full roster: " : "Add/update only: ") +
       updated + " updated, " + created + " new, " + inactivated + " inactivated; designations preserved");
     const problems = problemRows(t, p, errors);
-    const logged = await logUpload({ type: "Roster", file: p.fileName, warnings: p.warnings, problems, counts: {
+    const logged = await logUpload({ type: "Roster", file: p.fileName, warnings: p.warnings, problems, undo: packUndo(undo), counts: {
       rows: p.records.length + (p.noEmp || []).length, updated, added: created, inactivated,
       noEmployeeNumber: (p.noEmp || []).length, repeatedInFile: (p.dupRows || []).length, failed: errors.length } });
     DS.data.clear();
     const errCount = errors.length;
     renderMsg(result,
-      "Roster processed \u2014 " + updated + " existing updated, " + created + " added, " + inactivated + " marked inactive. " +
+      (doInactivate ? "Full roster" : "Add/update only") + " \u2014 " + updated + " existing updated, " + created + " added, " + inactivated + " marked inactive. " +
       (ops.length - errCount) + " of " + ops.length + " operations succeeded." +
       (errCount ? " Re-running the same file is safe and will retry only what's needed." : " Designations were preserved.") + " " + logNote(logged),
       errCount ? "warn" : "ok");
@@ -884,6 +921,173 @@
   DS.ensureXlsx = ensureXlsx;   // shared with the reports export
   DS.runBatched = runBatched;   // shared with the legacy migration tool
   DS.errorSummaryEl = errorSummaryEl;
+  /* ============================================================
+     UNDO A ROSTER IMPORT  (Audit log → Upload results → a Roster entry)
+     New imports record exactly which items they inactivated, reactivated,
+     and added. Older imports (before Nov 10, 2026) didn't, so for those the
+     changes are found from SharePoint's version history on each item.
+     Undo reverses active/inactive status and, if chosen, removes added
+     people. Name/rank/assignment updates aren't reversed — the next full
+     roster upload refreshes those.
+     ============================================================ */
+  function activeVal(v) { return v === true || v === 1 || v === "1" || /^(yes|true)$/i.test(String(v)); }
+  function encodeIds(ids) {           // [1,2,3,7,9,10] → "1-3,7,9-10" (keeps the log entry small)
+    const a = Array.from(new Set(ids)).sort((x, y) => x - y), out = [];
+    for (let i = 0; i < a.length; i++) {
+      let j = i; while (j + 1 < a.length && a[j + 1] === a[j] + 1) j++;
+      out.push(j > i ? a[i] + "-" + a[j] : String(a[i])); i = j;
+    }
+    return out.join(",");
+  }
+  function decodeIds(str) {
+    const out = [];
+    String(str || "").split(",").forEach(part => {
+      if (!part) return;
+      const m = part.split("-").map(Number);
+      if (m.length === 2) for (let n = m[0]; n <= m[1]; n++) out.push(n); else if (!isNaN(m[0])) out.push(m[0]);
+    });
+    return out;
+  }
+  function packUndo(u) {
+    return { start: u.start, end: u.end, mode: u.mode,
+      inactivated: encodeIds(u.inactivated), reactivated: encodeIds(u.reactivated), created: encodeIds(u.created) };
+  }
+
+  /* Did this item's ActiveEmployee change to `toActive` inside [start, end]? (versions are newest first) */
+  function changedInWindow(versions, start, end, toActive) {
+    for (let i = 0; i < versions.length - 1; i++) {
+      const v = versions[i], prev = versions[i + 1];
+      const t = new Date(v.Modified || v.Created).getTime();
+      if (t >= start && t <= end && activeVal(v.ActiveEmployee) === toActive && activeVal(prev.ActiveEmployee) !== toActive) return true;
+    }
+    return false;
+  }
+
+  async function renderRosterUndo(host, x) {
+    host.innerHTML = "";
+    const body = el("div", { class: "card__body" });
+    host.appendChild(el("div", { class: "card", style: "margin-top:14px" }, [
+      el("div", { class: "card__head" }, [el("h3", { text: "Undo this roster import" })]), body]));
+    if (x.undone) {
+      body.appendChild(el("div", { class: "import-note", text: "This import was undone " + DS.fmtDateTime(x.undone.at) +
+        (x.undone.by ? " by " + DS.emailLocal(x.undone.by) : "") + "." }));
+      return;
+    }
+    body.appendChild(el("div", { class: "help", text: x.undo
+      ? "Reverses who this import marked active or inactive, and can remove the people it added. Name, rank, and assignment updates aren't reversed (the next full roster upload refreshes them). Designations and all course, physical, and accident records are untouched."
+      : "This import was made before undo records were kept, so the app will look through SharePoint's version history to find who it marked inactive or active. That reads every recently changed person and can take several minutes." }));
+    const go = el("button", { class: "btn btn--ghost", text: "Check what this import changed", style: "margin-top:10px" });
+    body.appendChild(go);
+    go.addEventListener("click", async () => {
+      if (DS.job.busy()) return;
+      go.disabled = true;
+      const status = el("div", { class: "help", style: "margin-top:8px", text: "Reading the roster…" });
+      body.appendChild(status);
+      try { await analyzeUndo(body, x, status); }
+      catch (e) { status.textContent = "Couldn't check this import: " + e.message; go.disabled = false; }
+    });
+  }
+
+  async function analyzeUndo(body, x, status) {
+    const roster = await DS.spGet(DS.LISTS.roster, { select: ["Id", "Title", "EmployeeId", "Rank", "ActiveEmployee", "Modified", "Created"] });
+    const byId = new Map(roster.map(r => [r.Id, r]));
+    let toReactivate, toInactivate, toRemove, note = "";
+
+    if (x.undo) {
+      toReactivate = decodeIds(x.undo.inactivated).map(id => byId.get(id)).filter(r => r && !activeVal(r.ActiveEmployee));
+      toInactivate = decodeIds(x.undo.reactivated).map(id => byId.get(id)).filter(r => r && activeVal(r.ActiveEmployee));
+      toRemove = decodeIds(x.undo.created).map(id => byId.get(id)).filter(Boolean);
+    } else {
+      // Older import: the log entry was written as the import finished. Look at
+      // changes in the 3 hours before that (an import of thousands takes a while).
+      const end = new Date(x.at).getTime() + 2 * 60000, start = end - 3 * 3600000;
+      const recent = roster.filter(r => new Date(r.Modified).getTime() >= start);
+      toRemove = roster.filter(r => { const c = new Date(r.Created).getTime(); return c >= start && c <= end; });
+      const removeIds = new Set(toRemove.map(r => r.Id));
+      const check = recent.filter(r => !removeIds.has(r.Id));
+      toReactivate = []; toInactivate = [];
+      let withHistory = 0;
+      const errs = await runBatched(check, async r => {
+        const versions = await DS.spItemVersions(DS.LISTS.roster, r.Id);
+        if (versions.length > 1) withHistory++;
+        const nowActive = activeVal(r.ActiveEmployee);
+        if (!nowActive && changedInWindow(versions, start, end, false)) toReactivate.push(r);
+        if (nowActive && changedInWindow(versions, start, end, true)) toInactivate.push(r);
+      }, (d, t) => { status.textContent = "Checking version history: " + d.toLocaleString() + " of " + t.toLocaleString() + "…"; }, 4, "Checking roster history");
+      if (check.length && !withHistory) {
+        status.textContent = "Version history looks turned off for DrivingSafety_Roster, so the changes can't be found this way. " +
+          "Instead, upload the latest full monthly roster as “Full roster,” then upload the short list again as “Add or update only.”";
+        return;
+      }
+      if (errs.length) note = errs.length + " people couldn't be checked (" + (errs[0].message || "error") + "). Running the check again may find them.";
+      // People someone changed by hand after the import show up here only if
+      // their status still matches what the import set.
+    }
+    status.remove();
+    showUndoPlan(body, x, { toReactivate, toInactivate, toRemove }, note);
+  }
+
+  function showUndoPlan(body, x, plan, note) {
+    const ppl = n => n.toLocaleString() + (n === 1 ? " person" : " people");
+    const nameOf = r => (r.Title || "(no name)") + " · " + r.EmployeeId + (r.Rank ? " · " + r.Rank : "");
+    const box = el("div", { style: "margin-top:12px" });
+    body.appendChild(box);
+    if (note) box.appendChild(el("div", { class: "import-note warn", text: note }));
+    const total = plan.toReactivate.length + plan.toInactivate.length + plan.toRemove.length;
+    if (!total) { box.appendChild(el("div", { class: "import-note", text: "Nothing left to undo — everyone's status already matches what it was before this import." })); return; }
+    const choice = (n, label, checked, people, warn) => {
+      if (!n) return null;
+      const cb = el("input", { type: "checkbox" }); cb.checked = checked;
+      const list = el("details", { style: "margin:2px 0 10px 25px" }, [el("summary", { class: "help", text: n === 1 ? "Show who" : "Show the " + n.toLocaleString() + " people" }),
+        el("div", { style: "max-height:220px; overflow-y:auto; font-size:13px; padding:6px 0" }, people.slice().sort((a, b) => String(a.Title).localeCompare(String(b.Title))).map(r => el("div", { text: nameOf(r) })))]);
+      box.appendChild(el("label", { class: "check", style: "align-items:flex-start; margin-top:6px" }, [cb, el("span", { text: label })]));
+      if (warn) box.appendChild(el("div", { class: "help", style: "margin-left:25px", text: warn }));
+      box.appendChild(list);
+      return cb;
+    };
+    const cbRe = choice(plan.toReactivate.length, "Reactivate " + ppl(plan.toReactivate.length) + " this import marked inactive", true, plan.toReactivate);
+    const cbIn = choice(plan.toInactivate.length, "Mark inactive again " + ppl(plan.toInactivate.length) + " this import reactivated", true, plan.toInactivate);
+    const cbRm = choice(plan.toRemove.length, "Remove " + ppl(plan.toRemove.length) + " this import added", false, plan.toRemove,
+      "Leave this unchecked if they belong on the roster (for example, recruits you meant to add). Removing them also removes their designations; any course or physical records stay in SharePoint.");
+    const btn = el("button", { class: "btn", text: "Undo selected changes", style: "margin-top:8px" });
+    box.appendChild(btn);
+    btn.addEventListener("click", async () => {
+      if (DS.job.busy()) return;
+      const ops = [];
+      if (cbRe && cbRe.checked) plan.toReactivate.forEach(r => ops.push({ kind: "re", r }));
+      if (cbIn && cbIn.checked) plan.toInactivate.forEach(r => ops.push({ kind: "in", r }));
+      if (cbRm && cbRm.checked) plan.toRemove.forEach(r => ops.push({ kind: "rm", r }));
+      if (!ops.length) { DS.toast("Nothing selected.", "error"); return; }
+      btn.disabled = true;
+      const prog = el("div", { class: "help", style: "margin-top:8px" }); box.appendChild(prog);
+      const errors = await runBatched(ops, async op => {
+        if (op.kind === "rm") await DS.spDelete(DS.LISTS.roster, op.r.Id);
+        else await DS.spUpdate(DS.LISTS.roster, op.r.Id, { ActiveEmployee: op.kind === "re" });
+      }, (d, t, label) => { prog.textContent = label || ("Saving " + d.toLocaleString() + " of " + t.toLocaleString() + "…"); }, 4, "Undoing roster import");
+      const failed = new Set(errors.map(e => e.item));
+      const ok = k => ops.filter(o => o.kind === k && !failed.has(o)).length;
+      const counts = { reactivated: ok("re"), inactivated: ok("in"), removed: ok("rm"), failed: errors.length };
+      await DS.audit("Roster import undone", DS.LISTS.roster, null, (x.file || "Roster") + " (" + DS.fmtDateTime(x.at) + "): " +
+        counts.reactivated + " reactivated, " + counts.inactivated + " marked inactive, " + counts.removed + " removed" + (errors.length ? ", " + errors.length + " failed" : ""));
+      if (!errors.length && x.doc) {    // mark the original entry as undone
+        try {
+          x.doc.undone = { at: new Date().toISOString(), by: (DS.me && (DS.me.mail || DS.me.userPrincipalName)) || "", counts };
+          await DS.spUpdate(DS.LISTS.uploads, x.id, { Details: JSON.stringify(x.doc) });
+        } catch (e) { console.warn("Couldn't mark the upload entry as undone:", e.message); }
+      }
+      await logUpload({ type: "Roster undo", file: "Undo of " + (x.file || "roster import"), counts,
+        problems: errors.map(e => ({ why: "Failed to save", row: "", id: e.item ? String(e.item.r.EmployeeId || "") : "", name: e.item ? (e.item.r.Title || "") : "",
+          info: e.item ? ({ re: "Reactivate", in: "Mark inactive", rm: "Remove" })[e.item.kind] : "", note: e.message || String(e) })) });
+      DS.data.clear();
+      prog.textContent = "";
+      box.appendChild(el("div", { class: "import-note" + (errors.length ? " warn" : ""), text:
+        "Undo finished — " + counts.reactivated + " reactivated, " + counts.inactivated + " marked inactive, " + counts.removed + " removed." +
+        (errors.length ? " " + errors.length + " couldn't be saved; run Check again to retry them." : "") }));
+      DS.toast("Roster import undone.", errors.length ? "error" : "success");
+    });
+  }
+  DS.renderRosterUndo = renderRosterUndo;
+
   DS.logUpload = logUpload;            // migration tool records its runs too
   DS.problemsDetails = problemsDetails; // Audit log → Upload results
   DS.downloadProblems = downloadProblems;

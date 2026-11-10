@@ -894,6 +894,7 @@
     rows: "Rows in file", added: "Added", updated: "Updated", inactivated: "Marked inactive", byName: "Matched by name (your choice)",
     byEmployeeNumber: "Matched by employee #", byBadge: "Matched by badge", noMatch: "Matched no one",
     matchedTwoPeople: "Two possible people (unsettled)", resolvedByName: "Two possible people (name confirmed)", alreadyInSharePoint: "Already in SharePoint",
+    reactivated: "Reactivated", removed: "Removed",
     repeatedInFile: "Repeated in file", onlySomeCourses: "Only some required courses", pointsMismatch: "Points to check",
     noEmployeeNumber: "No employee number", failed: "Failed to save",
     employees: "Employees in sheet", savesAttempted: "Total saves (progress bar)", designationsSet: "Designations set", physicalsAdded: "Physical records added",
@@ -920,7 +921,8 @@
       const counts = d.counts || {};
       const added = counts.added != null ? counts.added : (counts.physicalsAdded || 0) + (counts.coursesAdded || 0);
       return { id: r.Id, type: r.UploadType || d.type || "", file: r.Title || d.file || "", at: d.at || r.Created, by: d.by || "",
-        counts, added, review: d.review || 0, problems: d.problems || [], truncated: !!d.truncated, warnings: d.warnings || [] };
+        counts, added, review: d.review || 0, problems: d.problems || [], truncated: !!d.truncated, warnings: d.warnings || [],
+        undo: d.undo || null, undone: d.undone || null, doc: r.Details ? d : null };
     });
     container.innerHTML = "";
     const pill = el("span", { class: "count-pill" });
@@ -937,7 +939,7 @@
       rowClass: x => x.id === selected ? "selected" : "",
       columns: [
         { head: "When", tdClass: "nowrap", sort: x => DS.parseDate(x.at), dir: -1, render: x => el("span", { class: "tnum", text: DS.fmtDateTime(x.at) }) },
-        { head: "Type", sort: x => x.type, render: x => DS.badge(x.type || "\u2014", "neutral") },
+        { head: "Type", sort: x => x.type, render: x => el("span", null, [DS.badge(x.type || "\u2014", "neutral"), x.undone ? el("span", { class: "help", text: " undone" }) : null]) },
         { head: "File", sort: x => x.file, render: x => x.file || "\u2014" },
         { head: "By", sort: x => DS.emailLocal(x.by), render: x => DS.emailLocal(x.by) || "\u2014" },
         { head: "In file", tdClass: "nowrap", sort: x => x.counts.rows || x.counts.employees || 0,
@@ -968,9 +970,15 @@
       else body.appendChild(el("div", { class: "import-note", text: "Nothing to review \u2014 every row was matched and saved." }));
       if (x.truncated) body.appendChild(el("div", { class: "help", text: "This upload had more problem rows than the log can hold; the list above is trimmed. The counts are complete." }));
       detail.appendChild(el("div", { class: "card" }, [
-        el("div", { class: "card__head" }, [el("h3", { text: (x.file || x.type) + " \u2014 " + DS.fmtDateTime(x.at) }), DS.badge(x.type, "neutral")]),
+        el("div", { class: "card__head" }, [el("h3", { text: (x.file || x.type) + " \u2014 " + DS.fmtDateTime(x.at) }),
+          x.undone ? DS.badge("Undone", "neutral") : DS.badge(x.type, "neutral")]),
         body,
       ]));
+      if (x.type === "Roster" && DS.renderRosterUndo) {
+        const undoHost = el("div");
+        detail.appendChild(undoHost);
+        DS.renderRosterUndo(undoHost, x);
+      }
       if (detail.scrollIntoView) detail.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }
